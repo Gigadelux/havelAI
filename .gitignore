@@ -1,0 +1,20 @@
+.claude/
+gitignore/
+.env
+temp/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.venv/
+dist/
+build/
+*.egg-info/
+
+# Training data and model outputs (large, and the dataset licence is unverified)
+model/train/data/*
+!model/train/data/.gitkeep
+model/train/checkpoints/
+*.safetensors
+*.pt
+*.bin

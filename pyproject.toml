@@ -1,0 +1,62 @@
+[project]
+name = "havelai"
+version = "0.1.0"
+description = "Small Python library for detecting and classifying prompt-injection attacks, with a local mmBERT classifier."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Security",
+    "Typing :: Typed",
+]
+# The library itself is stdlib-only. Training and data tooling live in the `model` extra.
+dependencies = []
+
+[project.optional-dependencies]
+# Versions are left open until `uv lock` resolves them; uv.lock is the source of truth.
+model = [
+    "accelerate",
+    "datasets",
+    "httpx",
+    "scikit-learn",
+    "torch",
+    "transformers",
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "ruff",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# The repo folder is `src/` (src/analytics, src/data, src/detection) but the package is
+# published as `havelai`: `import havelai.detection`. Inside the repo, tests and model/ import
+# `src.*`. Library code uses RELATIVE imports so it works under both names.
+# Hatch cannot do editable installs with a renamed prefix, so dev mode just puts the repo root on
+# sys.path (`import src.*` in the repo); the built wheel installs `havelai`.
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+exclude = ["src/tests"]
+dev-mode-dirs = ["."]
+
+[tool.hatch.build.targets.wheel.sources]
+"src" = "havelai"
+
+[tool.ruff]
+line-length = 100
+src = [".", "src"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501"]  # long strings are fine; the formatter handles code
+
+[tool.pytest.ini_options]
+testpaths = ["src/tests", "model/tests"]
+pythonpath = ["."]
