@@ -15,8 +15,17 @@ Add one line per meaningful change under `[Unreleased]`. Security-relevant chang
 - 2026-11-21: `Detection` and `Detector` (`src/detection/base.py`), `summarize` (`src/analytics/summary.py`).
 - 2026-11-21: `model/train/enhance_pipeline.py`: adds an attack type to `jayavibhav/prompt-injection` with Jev via OpenRouter; resumable, budgeted, with `--dry-run` and `--stats`.
 - 2026-11-21: placeholders `model/architecture.py` (mmBERT classifier) and `model/train/train.py`.
+- 2026-11-21: `model/train/train.py`: mmBERT fine-tuning (weighted loss, validation-based checkpointing, test evaluation, `--dry-run`) and `model/tests/test_train.py`.
 - 2026-11-21: `requirements.txt`: pinned `model` extra for pip users (resolved with pip; regenerate with `uv export` once `uv.lock` exists).
 - 2026-11-21: offline unit tests in `src/tests/` and `model/tests/`.
+
+### Changed
+- 2026-11-21: `train.py` now shows tqdm progress bars (per epoch, validation and test; `--no-progress` to turn off) and logs through the `havelai.train` logger to stderr and `<run>/train.log`: start configuration, data warnings, per-epoch progress, and errors with tracebacks. A NaN or infinite training loss now stops the run with a clear error; an interrupted run exits 130 and still exports its partial metrics. `tqdm` is now an explicit `model` dependency.
+- 2026-11-21: metrics split out of `train.py` into `model/train/metrics.py`: one class, `TrainingMetrics`, that computes the metrics, records training, and exports JSON tables plus six matplotlib plots into `<run>/metrics/` with `flush()`. New: a validation pass before training and the improvement metrics (change in validation accuracy / macro-F1 / loss per epoch, and the slope of training accuracy over batches). `matplotlib` added to the `model` extra; `uv.lock` and `requirements.txt` regenerated.
+- 2026-11-21: one encoder constant, `ENCODER_MODEL` (mmBERT-small), replaces `BASE_MODEL`/`SMALL_MODEL`/`DEFAULT_ENCODER`; `train.py` and the baseline now default to mmBERT-small, since mmBERT-base cannot meet the 256 MB limit.
+- 2026-11-21: `model/architecture.py` now defines the two-head model (`HavelForInjectionDetection`, `build_two_head`, `two_head_loss`, `decide`, `class_probabilities`, `type_target_from_record`); the single-head `build_classifier` is unchanged. Tests in `model/tests/test_architecture.py`. Vocabulary pruning, two-head training and the int8 export are not built yet.
+- 2026-11-21: `docs/MODEL_ARCHITECTURE.md` now describes the target design (mmBERT-small, 32k vocabulary, int8, binary + attack-type heads) with diagrams, size budget and the list of code still to write; decision logged in `DECISIONS.md`.
+- 2026-11-21: root `ARCHITECTURE.md` now covers only the Python library; model material moved to `docs/ENHANCEMENT_PIPELINE.md`, `docs/TRAINING.md` and `docs/MODEL_ARCHITECTURE.md`. `CLAUDE.md` and `README.md` keep short overviews that link there.
 
 ### Fixed
 - 2026-11-21: relative imports in `src/` and `dev-mode-dirs` so the `src` → `havelai` rename works for built wheels and editable installs.

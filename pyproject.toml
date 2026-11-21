@@ -21,8 +21,10 @@ model = [
     "accelerate",
     "datasets",
     "httpx",
+    "matplotlib",
     "scikit-learn",
     "torch",
+    "tqdm",
     "transformers",
 ]
 

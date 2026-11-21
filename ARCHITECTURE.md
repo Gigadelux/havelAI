@@ -2,58 +2,62 @@
 
 _Last updated: 2026-11-21_
 
-havelAI has a small, dependency-free **library** and a separate **model workspace**. The attack taxonomy is the contract between them.
+This file describes the **Python library** (`src/`, installed as `havelai`). The model workspace (`model/`) has its own documents in `docs/`; a short overview is at the end.
+
+The library is stdlib-only at runtime. It defines what a detection is, which attack classes exist, and how results are aggregated. Detectors plug in behind a small protocol.
 
 ## Layout
 
 ```
 src/                       published as `havelai`
+├── __init__.py            public exports: AttackType, ATTACK_CRITERIA, Detection, Detector
 ├── analytics/             summarize detections (counts per attack type, injection rate)
 ├── data/                  taxonomy.py: attack classes, labeler criteria, label ids
 ├── detection/             Detection result, Detector protocol, detectors
-└── tests/
-model/                     not shipped
-├── train/
-│   ├── data/              raw + enhanced JSONL (gitignored)
-│   ├── enhance_pipeline.py
-│   └── train.py           (not implemented yet)
-├── architecture.py        mmBERT classifier builder
-└── tests/
+├── py.typed
+└── tests/                 not shipped
 ```
 
-`model/` imports `src.data.taxonomy`; `src/` never imports `model/`. The wheel contains `src/` only, renamed to `havelai` by Hatch.
+## Modules
 
-## Data flow
+| Module | Contents | Depends on |
+|---|---|---|
+| `data.taxonomy` | `AttackType` (StrEnum), `ATTACK_CRITERIA`, `INTENT_CRITERIA`, `LABELS`, `LABEL2ID`, `ID2LABEL`. The only place labels are defined. | nothing |
+| `detection.base` | `Detection(text, attack_type, score)` (frozen dataclass, `is_injection` property) and the `Detector` protocol (`detect(text) -> Detection`). | `data` |
+| `analytics.summary` | `summarize(detections) -> Summary(total, injections, by_attack_type, injection_rate)`. | `detection` |
+
+Dependencies point one way: `analytics → detection → data`. Nothing in `src/` imports `model/`.
 
 ```mermaid
 flowchart LR
-    HF[(jayavibhav/prompt-injection<br/>text + binary label)] --> D[dedupe + select<br/>seeded, resumable]
-    D -->|label 0| B[benign, no API call]
-    D -->|label 1| J[Jev via OpenRouter<br/>attack_type + intent]
-    J --> O[(enhanced/split.jsonl<br/>append-only)]
-    B --> O
-    O --> R[review needs_review rows]
-    R --> T[train.py: fine-tune mmBERT]
-    T --> M[local classifier]
-    M --> L[src/detection: Detector]
-    L --> A[src/analytics: summarize]
-    TX[src/data/taxonomy.py] -.-> J
-    TX -.-> T
-    TX -.-> L
+    T[text] --> D[Detector.detect]
+    D --> R[Detection<br/>attack_type + score]
+    R --> A[analytics.summarize]
+    A --> S[Summary]
+    TX[data.taxonomy<br/>AttackType] -.-> D
+    TX -.-> R
 ```
 
-## Enhancement pipeline
+`score` is the detector's confidence in `attack_type`, from 0 to 1. `Detection.is_injection` is true for every attack type except `benign`.
 
-1. **Load** both splits with `datasets` and drop rows with no text or a label outside {0, 1}.
-2. **Dedupe** by `sha1(normalized text)`. Identical texts are collapsed; texts that appear with both labels are excluded and counted.
-3. **Select** with a seeded shuffle over ids. `--limit N` takes the first N, so raising the limit later extends the same selection.
-4. **Skip** ids already in the output file (resume). A line cut off by a crash is repaired.
-5. **Label**: label 0 → `benign` in code. Label 1 → one request to Jev with two `choice` questions, `attack_type` (the training target) and `intent` (extra column). Retries with backoff on 429/5xx; 401/402/403 abort the run; other 4xx are logged per row and retried next run.
-6. **Write** one JSONL line per row, flushed: `id, split, text, label, attack_type, attack_type_confidence, attack_type_probs, intent, intent_confidence, needs_review, labeler_model, cost_usd, labeled_at`.
-7. **Budget**: `usage.cost` is summed; `--max-cost` stops the run gracefully.
+## Adding a detector
 
-Jev is a decision model, not a text generator: it returns a label with probabilities and no explanation. It has no abstain option, so the taxonomy includes `other_injection`, and low-confidence rows are flagged for review. Probabilities are calibrated only on average, so the review threshold must be tuned on a hand-labeled sample.
+Implement `detect(self, text: str) -> Detection` in a class under `src/detection/`. The `Detector` protocol is `runtime_checkable`, so `isinstance(obj, Detector)` works without inheritance. Detectors that need heavy dependencies (for example a transformer model) must import them lazily or sit behind an optional extra, so that importing `havelai` stays dependency-free. No concrete detector exists yet.
 
-## Library
+## Packaging and import names
 
-`Detection(text, attack_type, score)` is the result of scanning one text; `Detector` is the protocol every detector implements (`detect(text) -> Detection`). `analytics.summarize` aggregates detections. The mmBERT detector will be added in `src/detection/` once a model is trained.
+The folder is `src/`; the installed package is `havelai`. Hatch maps one to the other when the wheel is built (`[tool.hatch.build.targets.wheel.sources]` in `pyproject.toml`).
+
+- Library code uses **relative imports** (`from ..data.taxonomy import AttackType`), because an absolute `from src...` would fail in the wheel.
+- Tests and `model/` import `src.*`. Hatch cannot make an editable install with a renamed prefix, so `dev-mode-dirs = ["."]` puts the repo root on `sys.path` in development.
+- Verified by building a wheel and installing it (`import havelai.detection` works, `import src` does not) with `pip install -e .`, and with `uv sync` (the dev environment exposes `src`, not `havelai`).
+
+## Model workspace (overview)
+
+`model/` is not shipped. It turns the public dataset into a trained classifier that a future detector will load:
+
+1. [`enhance_pipeline.py`](docs/ENHANCEMENT_PIPELINE.md) adds an attack type to the binary labels of `jayavibhav/prompt-injection`, using the Jev decision model on OpenRouter.
+2. [`train.py`](docs/TRAINING.md) fine-tunes an mmBERT classifier on the result; `metrics.py` computes, tracks and plots its metrics.
+3. [`architecture.py`](docs/MODEL_ARCHITECTURE.md) defines the model: mmBERT-small with a binary and an attack-type head (defined and tested; training it, vocabulary pruning and the int8 export are not built yet).
+
+`model/` imports `src.data.taxonomy`, so the library and the model always agree on the class list. Details live in `docs/`: [`TAXONOMY.md`](docs/TAXONOMY.md), [`ENHANCEMENT_PIPELINE.md`](docs/ENHANCEMENT_PIPELINE.md), [`TRAINING.md`](docs/TRAINING.md), [`MODEL_ARCHITECTURE.md`](docs/MODEL_ARCHITECTURE.md).

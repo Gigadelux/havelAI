@@ -32,22 +32,26 @@ uv run pytest
 
 Without uv: `pip install -r requirements.txt` (pinned versions of the `model` extra). The library alone has no runtime dependencies. It is not published yet; build a wheel with `uv build` and install it to get `import havelai`.
 
-## Enhance the dataset
+## Model workspace
+
+`model/` (not shipped) relabels the dataset and trains the classifier. Quick commands:
 
 ```bash
 uv run python -m model.train.enhance_pipeline --split train --limit 200 --dry-run   # print a request, call nothing
-uv run python -m model.train.enhance_pipeline --split train --limit 200             # small paid trial
-uv run python -m model.train.enhance_pipeline --stats                               # class counts, review rate, cost
+uv run python -m model.train.train --dry-run                                         # data report, no torch
 ```
 
-Only label-1 rows are sent to Jev, so the cost scales with the positives. Check the measured cost of the 200-row trial before a full run, and pass `--max-cost` when you do one. Output is append-only JSONL in `model/train/data/enhanced/` and a stopped run resumes where it left off. Positive rows are sent to OpenRouter and TypeSafe: do not use private text.
+Positive dataset rows are sent to OpenRouter and TypeSafe for labeling: do not use private text. Check the measured cost of a 200-row trial before a full run. See [`docs/ENHANCEMENT_PIPELINE.md`](docs/ENHANCEMENT_PIPELINE.md) and [`docs/TRAINING.md`](docs/TRAINING.md).
 
 ## Documentation
 
 | File | What it covers |
 |---|---|
-| [`ARCHITECTURE.md`](ARCHITECTURE.md) | Layout, data flow, pipeline steps |
+| [`ARCHITECTURE.md`](ARCHITECTURE.md) | The Python library: modules, detector protocol, packaging |
 | [`docs/TAXONOMY.md`](docs/TAXONOMY.md) | Attack classes, literature, caveats |
+| [`docs/ENHANCEMENT_PIPELINE.md`](docs/ENHANCEMENT_PIPELINE.md) | Relabeling the dataset with Jev |
+| [`docs/TRAINING.md`](docs/TRAINING.md) | Fine-tuning, metrics and plots, outputs |
+| [`docs/MODEL_ARCHITECTURE.md`](docs/MODEL_ARCHITECTURE.md) | mmBERT-small with binary + attack-type heads, 32k vocabulary, int8 (model defined, training and export not built) |
 | [`DECISIONS.md`](DECISIONS.md) | Design choices as "X over Y because Z" |
 | [`SECURITY.md`](SECURITY.md) | Security model, reporting a vulnerability |
 | [`CHANGELOG.md`](CHANGELOG.md) | Notable changes |
@@ -60,8 +64,10 @@ New dependencies must be license-compatible with Apache 2.0. The library itself 
 | Dependency | Purpose | License |
 |---|---|---|
 | httpx (`model` extra) | Calls to OpenRouter | BSD-3-Clause |
+| matplotlib (`model` extra) | Metric plots | Matplotlib license (permissive, PSF-based) |
+| tqdm (`model` extra) | Training progress bars | MPL-2.0 and MIT (used unmodified as a dependency; MPL-2.0 is file-level copyleft, so do not vendor and edit its files) |
 | datasets, transformers, torch, accelerate, scikit-learn (`model` extra) | Data loading and training | Apache-2.0 (datasets, transformers, accelerate), BSD (torch, scikit-learn) |
-| mmBERT (`jhu-clsp/mmBERT-base`) | Base model | MIT |
+| mmBERT (`jhu-clsp/mmBERT-small`) | Base model | MIT |
 | pytest, ruff (dev) | Tests, lint and format | MIT |
 
 The dataset `jayavibhav/prompt-injection` shows no license on its card. Check with the author before redistributing it or anything derived from it.

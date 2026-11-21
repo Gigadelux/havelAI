@@ -16,6 +16,7 @@ Please do not open a public issue for security problems. Use GitHub's **private 
 
 - **Attack text is data.** The dataset contains prompt-injection and jailbreak text. It is never executed and never given to a generative model as instructions. The labeler (Jev) is a classifier, and its instructions say to treat the text as data.
 - **Third-party processing.** Positive dataset rows are sent to OpenRouter and TypeSafe (Jev) for labeling. Do not send private or customer text through `enhance_pipeline.py`.
+- **No raw text in training logs.** `model/train/train.py` logs settings, counts, progress and errors to stderr and `<run>/train.log`, never dataset text (a test checks this).
 - **No raw text in logs.** Progress output has counts and cost only. Error records hold the row id and the error, not the text. Raw text exists only in the dataset output files.
 - **Secrets.** `OPENROUTER_API_KEY` is read from the environment or `.env`, sent only in the `Authorization` header, and never logged or written to outputs. `.env` is gitignored.
 - **Spending control.** Runs support `--limit`, `--dry-run` and `--max-cost`. 401/402/403 abort the run instead of retrying.
