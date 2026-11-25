@@ -100,7 +100,27 @@ uv run python -m model.train.train --no-progress                                
 
 ## Training on RunPod
 
-`model/train/runpod_launch.py` runs `train.py` on a rented RunPod GPU pod, using the `runpod` SDK (2.4, in the `cloud` dependency group) plus `ssh`/`scp`. There is no network volume: everything lives on the pod's container disk and is gone after the pod is terminated, so `pull` the results first (`run` does it for you).
+`model/train/runpod_launch.py` runs `train.py` on a rented RunPod GPU pod, using the `runpod` SDK (2.4, in the `cloud` dependency group) plus `ssh`/`scp`. Code, data, the venv and the results live on the pod's container disk and are gone after the pod is terminated, so `pull` the results first (`run` does it for you).
+
+### Optional cache volume
+
+Every pod otherwise downloads about 3.5 GB of packages (torch and the CUDA libraries), at whatever speed its host has: about 12 seconds on one pod, about 2.8 MB/s (15–20 minutes) on another, 2026-11-25. With `RUNPOD_NETWORK_VOLUME_ID` set, a RunPod network volume is mounted at `/workspace`, and the download caches go to `/workspace/havelai-cache/`:
+
+- `uv/`: `UV_CACHE_DIR`, the packages for `uv sync`, with `UV_LINK_MODE=copy` because the venv is on another filesystem;
+- `pip/`: `PIP_CACHE_DIR`, for installing uv;
+- `huggingface/`: `HF_HOME`, the mmBERT download.
+
+The first pod fills the cache; later pods install from it. **Only public downloads go on the volume**: no data, no checkpoints, no venv. Results still come back with `pull`. The speed gain has not been measured yet.
+
+Setup, once:
+
+1. Create a network volume in the RunPod console. About 10 GB is enough, in a data center that has RTX 4090s.
+2. Set `RUNPOD_NETWORK_VOLUME_ID` to its id and `RUNPOD_DATA_CENTER` to its data center. The launcher refuses a volume without a data center, because a pod can only attach a volume in its own data center.
+
+Costs and limits:
+
+- The volume is billed monthly per GB **even when no pod runs**. Delete it in the console when you stop training.
+- Pods can only start in that data center. If it has no free 4090, creation fails; leave `RUNPOD_NETWORK_VOLUME_ID` empty to go back to any data center.
 
 ```mermaid
 flowchart LR
@@ -128,7 +148,8 @@ flowchart LR
 | `RUNPOD_CONTAINER_DISK_GB` | 30 | venv, model, data, checkpoints |
 | `RUNPOD_MIN_RAM_GB`, `RUNPOD_MIN_VCPU` | 16, 4 | **placement minimums per GPU, not caps**: RunPod picks a host with at least this much |
 | `RUNPOD_ALLOWED_CUDA` | `13.0,13.1,13.2` | host CUDA versions to accept; torch 2.15 from PyPI ships CUDA 13 libraries. Empty: no filter |
-| `RUNPOD_DATA_CENTER` | (any) | optional, for example `EU-RO-1` |
+| `RUNPOD_DATA_CENTER` | (any) | optional, for example `EU-RO-1`. Required with a network volume |
+| `RUNPOD_NETWORK_VOLUME_ID` | (none) | optional cache volume, see above |
 | `RUNPOD_MAX_HOURS` | 6 | train.py gets SIGINT after this (it exports its partial metrics), and is killed 5 minutes later |
 | `RUNPOD_MAX_HOURLY_USD` | 1.00 | a pod with a higher rate is terminated right after creation |
 | `RUNPOD_SSH_KEY` | (empty: `gitignore/temp/runpod_ed25519`, created on the first `--yes`) | private key for SSH |

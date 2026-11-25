@@ -20,6 +20,7 @@ Add one line per meaningful change under `[Unreleased]`. Security-relevant chang
 - 2026-11-21: offline unit tests in `src/tests/` and `model/tests/`.
 - 2026-11-25: `model/train/runpod_launch.py`: trains on a RunPod GPU pod over SSH, with no network volume (`up`, `push`, `train`, `status`, `logs`, `pull`, `down`, and `run` for all of it, which always terminates the pod). Pod size (RUNPOD_*) and training memory (TRAIN_*) are set in `.env`; `example.env` documents them. Dry run unless `--yes`; hourly-rate limit; training time limit. Tests in `model/tests/test_runpod_launch.py` (offline, fake SDK and ssh).
 - 2026-11-25: the launcher creates its own SSH key (`gitignore/temp/runpod_ed25519`) on the first `--yes` when `RUNPOD_SSH_KEY` is empty, so `RUNPOD_API_KEY` is the only value to fill in. A key set in `RUNPOD_SSH_KEY` is never generated.
+- 2026-11-25: optional RunPod network volume for download caches only (`RUNPOD_NETWORK_VOLUME_ID`, mounted at `/workspace`; uv, pip and Hugging Face caches in `/workspace/havelai-cache/`), so later pods skip the ~3.5 GB package download. Requires `RUNPOD_DATA_CENTER`. Data, venv and checkpoints stay on the container disk.
 - 2026-11-25: `train.py --gradient-checkpointing` to trade compute for activation memory.
 - 2026-11-25: `runpod>=2.4.0` (MIT) added in a new `cloud` dependency group. Resolving it with the rest moved `python-dateutil` from 4.0.0 to 2.9.0.post0 in `uv.lock` and `requirements.txt` (runpod's boto3/botocore needs `<3`).
 

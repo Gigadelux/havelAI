@@ -213,6 +213,41 @@ def test_pod_request_matches_the_sdk_signature(tmp_path):
     assert set(rl.pod_request(_settings(tmp_path, data_center="X"), "k")) <= set(params)
 
 
+def test_no_network_volume_by_default(tmp_path):
+    req = rl.pod_request(_settings(tmp_path), "k")
+    assert "network_volume_id" not in req and "volume_mount_path" not in req
+    script = rl.remote_train_script(rl.LaunchSettings(), "r")
+    assert "UV_CACHE_DIR" not in script and "HF_HOME" not in script
+
+
+def test_network_volume_is_mounted_and_holds_only_the_caches(tmp_path):
+    s = rl.settings_from_env(
+        {"RUNPOD_NETWORK_VOLUME_ID": "vol123", "RUNPOD_DATA_CENTER": "EU-RO-1"}
+    )
+    assert (s.network_volume_id, s.data_center) == ("vol123", "EU-RO-1")
+    req = rl.pod_request(s, "k")
+    assert req["network_volume_id"] == "vol123"
+    assert req["volume_mount_path"] == rl.VOLUME_MOUNT == "/workspace"
+    assert req["data_center_id"] == "EU-RO-1"
+    assert req["volume_in_gb"] == 0
+    script = rl.remote_train_script(s, "r")
+    for line in (
+        f"export UV_CACHE_DIR={rl.CACHE_DIR}/uv",
+        "export UV_LINK_MODE=copy",
+        f"export PIP_CACHE_DIR={rl.CACHE_DIR}/pip",
+        f"export HF_HOME={rl.CACHE_DIR}/huggingface",
+    ):
+        assert line in script
+    # caches are set before anything downloads; data, venv and checkpoints stay off the volume
+    assert script.index("UV_CACHE_DIR") < script.index("pip install") < script.index("uv sync")
+    assert f"cd {rl.REMOTE_DIR}" in script and rl.REMOTE_DIR.startswith("/root/")
+
+
+def test_network_volume_needs_its_data_center():
+    with pytest.raises(rl.LaunchError, match="RUNPOD_DATA_CENTER"):
+        rl.settings_from_env({"RUNPOD_NETWORK_VOLUME_ID": "vol123"})
+
+
 def test_display_request_shortens_the_public_key():
     shown = rl.display_request({"env": {"PUBLIC_KEY": "ssh-ed25519 " + "A" * 200}})
     assert "A" * 100 not in shown and "chars" in shown

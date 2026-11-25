@@ -1,4 +1,7 @@
-"""Train the classifier on a RunPod GPU pod, over SSH, with no network volume.
+"""Train the classifier on a RunPod GPU pod, over SSH.
+
+Data, venv and results live on the pod's container disk. An optional network volume
+(RUNPOD_NETWORK_VOLUME_ID) holds only the download caches, so later pods skip the package download.
 
 Flow: create a pod (runpod SDK) -> copy the committed code (`git archive HEAD`) and the enhanced
 data over scp -> run train.py detached under `timeout` -> copy `checkpoints/<run>/` back ->
@@ -62,6 +65,10 @@ POD_NAME = "havelai-train"
 CLOUD_TYPES = ("SECURE", "COMMUNITY", "ALL")
 FAILED_STATUSES = ("EXITED", "ERROR", "TERMINATED")
 SETUP_ALLOWANCE_S = 3600  # time for uv sync and the model download, on top of RUNPOD_MAX_HOURS
+# Optional network volume: holds only download caches (uv, pip, Hugging Face), never data or
+# results, so a new pod skips the ~3.5 GB package download. The venv stays on the container disk.
+VOLUME_MOUNT = "/workspace"
+CACHE_DIR = f"{VOLUME_MOUNT}/havelai-cache"
 
 
 class LaunchError(RuntimeError):
@@ -95,6 +102,7 @@ class LaunchSettings:
     min_ram_gb: int = 16
     min_vcpu: int = 4
     data_center: str | None = None
+    network_volume_id: str | None = None  # cache volume; needs data_center (same data center)
     allowed_cuda: tuple[str, ...] = DEFAULT_ALLOWED_CUDA
     max_hours: float = 6.0
     max_hourly_usd: float = 1.0
@@ -167,6 +175,13 @@ def settings_from_env(env: Mapping[str, str]) -> LaunchSettings:
         else tuple(v.strip() for v in cuda_raw.split(",") if v.strip())
     )
     ssh_key = _get(env, "RUNPOD_SSH_KEY")
+    volume = _get(env, "RUNPOD_NETWORK_VOLUME_ID")
+    data_center = _get(env, "RUNPOD_DATA_CENTER")
+    if volume and not data_center:
+        raise LaunchError(
+            "RUNPOD_NETWORK_VOLUME_ID needs RUNPOD_DATA_CENTER set to the volume's data center "
+            "(a pod can only attach a volume in its own data center)."
+        )
     return LaunchSettings(
         api_key=_get(env, "RUNPOD_API_KEY") or "",
         gpu_type=_get(env, "RUNPOD_GPU_TYPE") or d.gpu_type,
@@ -176,7 +191,8 @@ def settings_from_env(env: Mapping[str, str]) -> LaunchSettings:
         container_disk_gb=_int(env, "RUNPOD_CONTAINER_DISK_GB", d.container_disk_gb, minimum=10),
         min_ram_gb=_int(env, "RUNPOD_MIN_RAM_GB", d.min_ram_gb),
         min_vcpu=_int(env, "RUNPOD_MIN_VCPU", d.min_vcpu),
-        data_center=_get(env, "RUNPOD_DATA_CENTER"),
+        data_center=data_center,
+        network_volume_id=volume,
         allowed_cuda=allowed_cuda,
         max_hours=_float(env, "RUNPOD_MAX_HOURS", d.max_hours),
         max_hourly_usd=_float(env, "RUNPOD_MAX_HOURLY_USD", d.max_hourly_usd),
@@ -233,7 +249,8 @@ def read_public_key(
 
 
 def pod_request(settings: LaunchSettings, public_key: str, name: str = POD_NAME) -> dict[str, Any]:
-    """Keyword arguments for `runpod.create_pod`. No API key in `env`, no persistent volume."""
+    """Keyword arguments for `runpod.create_pod`. No API key in `env`, no host-local volume;
+    the optional network volume (download caches only) is mounted at VOLUME_MOUNT."""
     request: dict[str, Any] = {
         "name": name,
         "image_name": settings.image,
@@ -255,7 +272,27 @@ def pod_request(settings: LaunchSettings, public_key: str, name: str = POD_NAME)
         request["data_center_id"] = settings.data_center
     if settings.allowed_cuda:
         request["allowed_cuda_versions"] = list(settings.allowed_cuda)
+    if settings.network_volume_id:
+        request["network_volume_id"] = settings.network_volume_id
+        request["volume_mount_path"] = VOLUME_MOUNT
     return request
+
+
+def cache_exports(settings: LaunchSettings) -> list[str]:
+    """Shell lines that point the download caches at the network volume (none without one).
+
+    UV_LINK_MODE=copy: the cache is on another filesystem than the venv, so uv cannot hardlink
+    and would otherwise warn before falling back to copying."""
+    if not settings.network_volume_id:
+        return []
+    return [
+        f"mkdir -p {CACHE_DIR}/uv {CACHE_DIR}/pip {CACHE_DIR}/huggingface",
+        f"export UV_CACHE_DIR={CACHE_DIR}/uv",
+        "export UV_LINK_MODE=copy",
+        f"export PIP_CACHE_DIR={CACHE_DIR}/pip",
+        f"export HF_HOME={CACHE_DIR}/huggingface",
+        f'echo "cache: $(du -sh {CACHE_DIR} | cut -f1) on the network volume"',
+    ]
 
 
 def display_request(request: Mapping[str, Any]) -> str:
@@ -329,6 +366,7 @@ def remote_train_script(
             "set -e",
             f"export PYTORCH_CUDA_ALLOC_CONF={shlex.quote(settings.cuda_alloc_conf)}",
             'export PATH="$HOME/.local/bin:$PATH"',
+            *cache_exports(settings),
             f"python3 -m pip install --quiet {uv} "
             f"|| python3 -m pip install --quiet --break-system-packages {uv}",
             "uv sync --frozen --no-dev --extra model",
