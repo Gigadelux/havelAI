@@ -1,25 +1,28 @@
-"""Train the classifier on a RunPod GPU pod, over SSH.
+"""Train the classifier on a RunPod GPU pod, over SSH, and keep the pod for the next run.
 
-Data, venv and results live on the pod's container disk. An optional network volume
-(RUNPOD_NETWORK_VOLUME_ID) holds only the download caches, so later pods skip the package download.
+Flow: reuse the pod named by RUNPOD_POD_ID (or the one recorded by the last run), resuming it if
+it is stopped, or create one -> copy the committed code (`git archive HEAD`) and the enhanced
+data (skipped when unchanged) -> run train.py detached under `timeout` -> copy the run back ->
+STOP the pod (GPU released, files kept). Settings come from `.env` (RUNPOD_* and TRAIN_*).
 
-Flow: create a pod (runpod SDK) -> copy the committed code (`git archive HEAD`) and the enhanced
-data over scp -> run train.py detached under `timeout` -> copy `checkpoints/<run>/` back ->
-terminate the pod. Settings come from `.env` (see example.env, RUNPOD_* and TRAIN_*).
+Everything lives under /workspace, which survives a stop: a pod volume (RUNPOD_VOLUME_GB), or the
+network volume when RUNPOD_NETWORK_VOLUME_ID is set. So a resumed pod needs no package download
+and no data upload, only the code update and `uv sync` (a no-op when uv.lock did not change).
 
-    uv run python -m model.train.runpod_launch up                   # dry run: print the request
+    uv run python -m model.train.runpod_launch up                   # dry run: what would happen
     uv run python -m model.train.runpod_launch run --yes -- --epochs 1 --limit-train 2000
     uv run python -m model.train.runpod_launch up --yes             # step by step instead:
     uv run python -m model.train.runpod_launch push
     uv run python -m model.train.runpod_launch train -- --epochs 3
     uv run python -m model.train.runpod_launch status | logs
     uv run python -m model.train.runpod_launch pull
-    uv run python -m model.train.runpod_launch down
+    uv run python -m model.train.runpod_launch stop                 # keep the pod, release the GPU
+    uv run python -m model.train.runpod_launch down                 # delete the pod for good
 
-Spending: nothing is created without `--yes`. A pod whose hourly rate is above
+Spending: nothing is created or resumed without `--yes`. A NEW pod whose hourly rate is above
 RUNPOD_MAX_HOURLY_USD is terminated at once. Training is stopped after RUNPOD_MAX_HOURS. `run`
-always terminates the pod at the end, also on errors and Ctrl+C. After step-by-step use,
-`down` is your job: a pod keeps billing until it is terminated.
+always stops the pod at the end, also on errors and Ctrl+C (`--terminate` deletes it instead).
+A stopped pod no longer pays for the GPU but still pays for its storage until `down`.
 
 Memory: RUNPOD_MIN_RAM_GB and RUNPOD_MIN_VCPU are placement minimums, not caps. GPU memory is
 bounded by the GPU type and the TRAIN_* settings (batch size, max length, gradient
@@ -27,12 +30,14 @@ checkpointing), which are passed to train.py as flags.
 
 Secrets: the RunPod API key stays on this machine (it is not put in the pod env). Only the SSH
 public key is sent. `git archive HEAD` uploads committed files only, so `.env` and `gitignore/`
-never leave the machine.
+never leave the machine. The enhanced data stays on the pod's /workspace until `down` (or on
+the network volume until you delete the files or the volume).
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shlex
@@ -54,7 +59,6 @@ DEFAULT_IMAGE = "runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404"
 # torch 2.15 from PyPI ships CUDA 13 libraries, so the host driver must support CUDA 13.
 DEFAULT_ALLOWED_CUDA = ("13.0", "13.1", "13.2")
 UV_VERSION = "0.13.9"  # same uv as the dev machine
-REMOTE_DIR = "/root/havelai"
 DATA_DIR = Path("model/train/data/enhanced")
 DATA_FILES = ("train.jsonl", "test.jsonl")  # train.jsonl is required
 CHECKPOINTS_DIR = Path("model/train/checkpoints")
@@ -65,14 +69,23 @@ POD_NAME = "havelai-train"
 CLOUD_TYPES = ("SECURE", "COMMUNITY", "ALL")
 FAILED_STATUSES = ("EXITED", "ERROR", "TERMINATED")
 SETUP_ALLOWANCE_S = 3600  # time for uv sync and the model download, on top of RUNPOD_MAX_HOURS
-# Optional network volume: holds only download caches (uv, pip, Hugging Face), never data or
-# results, so a new pod skips the ~3.5 GB package download. The venv stays on the container disk.
+
+# Remote layout. /workspace survives a stop (pod volume or network volume); the container disk
+# does not. The code folder is replaced on every push; everything else is kept.
 VOLUME_MOUNT = "/workspace"
-CACHE_DIR = f"{VOLUME_MOUNT}/havelai-cache"
+REMOTE_DIR = f"{VOLUME_MOUNT}/havelai"  # code (git archive HEAD), run_train.sh, run.out, run.exit
+REMOTE_VENV = f"{VOLUME_MOUNT}/havelai-venv"  # uv sync target (UV_PROJECT_ENVIRONMENT)
+REMOTE_DATA = f"{VOLUME_MOUNT}/havelai-data"  # train.jsonl, test.jsonl (train.py --data-dir)
+REMOTE_RUNS = f"{VOLUME_MOUNT}/havelai-runs"  # checkpoints/<run>/ (train.py --out-dir)
+CACHE_DIR = f"{VOLUME_MOUNT}/havelai-cache"  # uv, pip and Hugging Face download caches
 
 
 class LaunchError(RuntimeError):
     """A launch step failed; the message says what to do."""
+
+
+class CostLimitError(LaunchError):
+    """The pod's hourly rate is above RUNPOD_MAX_HOURLY_USD."""
 
 
 def say(message: str) -> None:
@@ -94,15 +107,19 @@ def run_command(
 @dataclass(frozen=True)
 class LaunchSettings:
     api_key: str = ""
+    pod_id: str | None = None  # reuse this pod instead of creating one
     gpu_type: str = "NVIDIA GeForce RTX 4090"
     gpu_count: int = 1
     cloud_type: str = "SECURE"
     image: str = DEFAULT_IMAGE
-    container_disk_gb: int = 30
+    container_disk_gb: int = 20
+    volume_gb: int = (
+        30  # pod volume at /workspace, kept across stops (unused with a network volume)
+    )
     min_ram_gb: int = 16
     min_vcpu: int = 4
     data_center: str | None = None
-    network_volume_id: str | None = None  # cache volume; needs data_center (same data center)
+    network_volume_id: str | None = None  # replaces the pod volume; needs data_center
     allowed_cuda: tuple[str, ...] = DEFAULT_ALLOWED_CUDA
     max_hours: float = 6.0
     max_hourly_usd: float = 1.0
@@ -184,11 +201,13 @@ def settings_from_env(env: Mapping[str, str]) -> LaunchSettings:
         )
     return LaunchSettings(
         api_key=_get(env, "RUNPOD_API_KEY") or "",
+        pod_id=_get(env, "RUNPOD_POD_ID"),
         gpu_type=_get(env, "RUNPOD_GPU_TYPE") or d.gpu_type,
         gpu_count=_int(env, "RUNPOD_GPU_COUNT", d.gpu_count),
         cloud_type=cloud,
         image=image,
         container_disk_gb=_int(env, "RUNPOD_CONTAINER_DISK_GB", d.container_disk_gb, minimum=10),
+        volume_gb=_int(env, "RUNPOD_VOLUME_GB", d.volume_gb, minimum=10),
         min_ram_gb=_int(env, "RUNPOD_MIN_RAM_GB", d.min_ram_gb),
         min_vcpu=_int(env, "RUNPOD_MIN_VCPU", d.min_vcpu),
         data_center=data_center,
@@ -249,8 +268,10 @@ def read_public_key(
 
 
 def pod_request(settings: LaunchSettings, public_key: str, name: str = POD_NAME) -> dict[str, Any]:
-    """Keyword arguments for `runpod.create_pod`. No API key in `env`, no host-local volume;
-    the optional network volume (download caches only) is mounted at VOLUME_MOUNT."""
+    """Keyword arguments for `runpod.create_pod`. No API key in `env`.
+
+    /workspace is a pod volume of RUNPOD_VOLUME_GB, or the network volume when one is set (the
+    SDK then ignores `volume_in_gb`, so it is sent as 0)."""
     request: dict[str, Any] = {
         "name": name,
         "image_name": settings.image,
@@ -258,7 +279,8 @@ def pod_request(settings: LaunchSettings, public_key: str, name: str = POD_NAME)
         "gpu_count": settings.gpu_count,
         "cloud_type": settings.cloud_type,
         "container_disk_in_gb": settings.container_disk_gb,
-        "volume_in_gb": 0,
+        "volume_in_gb": 0 if settings.network_volume_id else settings.volume_gb,
+        "volume_mount_path": VOLUME_MOUNT,
         "min_memory_in_gb": settings.min_ram_gb,
         "min_vcpu_count": settings.min_vcpu,
         "ports": "22/tcp",
@@ -274,24 +296,18 @@ def pod_request(settings: LaunchSettings, public_key: str, name: str = POD_NAME)
         request["allowed_cuda_versions"] = list(settings.allowed_cuda)
     if settings.network_volume_id:
         request["network_volume_id"] = settings.network_volume_id
-        request["volume_mount_path"] = VOLUME_MOUNT
     return request
 
 
-def cache_exports(settings: LaunchSettings) -> list[str]:
-    """Shell lines that point the download caches at the network volume (none without one).
-
-    UV_LINK_MODE=copy: the cache is on another filesystem than the venv, so uv cannot hardlink
-    and would otherwise warn before falling back to copying."""
-    if not settings.network_volume_id:
-        return []
+def cache_exports() -> list[str]:
+    """Shell lines that keep the download caches and the venv under /workspace."""
     return [
-        f"mkdir -p {CACHE_DIR}/uv {CACHE_DIR}/pip {CACHE_DIR}/huggingface",
+        f"mkdir -p {CACHE_DIR}/uv {CACHE_DIR}/pip {CACHE_DIR}/huggingface {REMOTE_RUNS}",
         f"export UV_CACHE_DIR={CACHE_DIR}/uv",
-        "export UV_LINK_MODE=copy",
         f"export PIP_CACHE_DIR={CACHE_DIR}/pip",
         f"export HF_HOME={CACHE_DIR}/huggingface",
-        f'echo "cache: $(du -sh {CACHE_DIR} | cut -f1) on the network volume"',
+        f"export UV_PROJECT_ENVIRONMENT={REMOTE_VENV}",
+        f'echo "cache: $(du -sh {CACHE_DIR} | cut -f1) in {CACHE_DIR}"',
     ]
 
 
@@ -349,7 +365,10 @@ def remote_train_script(
     124 in run.exit means RUNPOD_MAX_HOURS was reached (train.py got SIGINT first, so it still
     exported its partial metrics); 3 means the pod has no usable CUDA."""
     seconds = int(settings.max_hours * 3600)
-    args = [*train_flags(settings), *extra_args, "--no-progress", "--run-name", run_name]
+    args = [
+        "--data-dir", REMOTE_DATA, "--out-dir", REMOTE_RUNS,
+        *train_flags(settings), *extra_args, "--no-progress", "--run-name", run_name,
+    ]  # fmt: skip
     cuda_check = (
         "import sys, torch; ok = torch.cuda.is_available(); "
         'print("torch", torch.__version__, "cuda", torch.version.cuda, "available", ok); '
@@ -366,10 +385,11 @@ def remote_train_script(
             "set -e",
             f"export PYTORCH_CUDA_ALLOC_CONF={shlex.quote(settings.cuda_alloc_conf)}",
             'export PATH="$HOME/.local/bin:$PATH"',
-            *cache_exports(settings),
+            *cache_exports(),
+            # uv lives on the container disk, which a stop wipes: reinstall (from the pip cache)
             f"python3 -m pip install --quiet {uv} "
             f"|| python3 -m pip install --quiet --break-system-packages {uv}",
-            "uv sync --frozen --no-dev --extra model",
+            "uv sync --frozen --no-dev --extra model",  # a no-op when the kept venv is current
             f"uv run --no-sync python -c {shlex.quote(cuda_check)}",
             f"timeout --signal=INT --kill-after=300 {seconds} "
             f"uv run --no-sync python -m model.train.train {shlex.join(args)}",
@@ -447,18 +467,36 @@ def save_state(state: Mapping[str, Any], path: Path = STATE_FILE) -> None:
     path.write_text(json.dumps(dict(state), indent=2))
 
 
+def read_state(path: Path = STATE_FILE) -> dict[str, Any]:
+    return json.loads(path.read_text()) if path.is_file() else {}
+
+
 def load_state(path: Path = STATE_FILE) -> dict[str, Any]:
-    if not path.is_file():
+    state = read_state(path)
+    if not state.get("pod_id"):
         raise LaunchError(f"No pod recorded in {path}. Run `up --yes` first.")
-    return json.loads(path.read_text())
+    return state
+
+
+def pod_id_to_use(settings: LaunchSettings, state: Mapping[str, Any]) -> str | None:
+    """RUNPOD_POD_ID wins; otherwise the pod recorded by the last `up`; otherwise None (create)."""
+    return settings.pod_id or state.get("pod_id") or None
 
 
 def remote_from_state(
     state: Mapping[str, Any], settings: LaunchSettings, runner: Runner = run_command
 ) -> Remote:
     if not state.get("host") or not state.get("port"):
-        raise LaunchError("The recorded pod has no SSH endpoint. Run `status` or `down`.")
+        raise LaunchError("The recorded pod has no SSH endpoint. Run `up --yes` to start it.")
     return Remote(state["host"], int(state["port"]), settings.ssh_key, runner=runner)
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as fh:
+        for block in iter(lambda: fh.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 # --------------------------------------------------------------------------- steps
@@ -468,7 +506,7 @@ def check_cost(pod: Mapping[str, Any], max_hourly_usd: float) -> float | None:
     """Return the pod's hourly rate; raise if it is above the limit."""
     cost = pod.get("cost")
     if isinstance(cost, int | float) and cost > max_hourly_usd:
-        raise LaunchError(
+        raise CostLimitError(
             f"pod costs ${cost:.3f}/h, above RUNPOD_MAX_HOURLY_USD=${max_hourly_usd:.2f}"
         )
     return float(cost) if isinstance(cost, int | float) else None
@@ -481,8 +519,12 @@ def wait_for_ssh(
     interval_s: float = 10,
     sleep: Callable[[float], None] = time.sleep,
     clock: Callable[[], float] = time.monotonic,
+    failed: Sequence[str] = FAILED_STATUSES,
 ) -> tuple[dict[str, Any], tuple[str, int]]:
-    """Poll until the pod is RUNNING with a public port 22."""
+    """Poll until the pod is RUNNING with a public port 22.
+
+    After a resume the pod may still report EXITED for a moment, so `up` passes `failed`
+    without EXITED; a pod that never leaves EXITED then runs into the timeout."""
     deadline = clock() + timeout_s
     last = None
     while True:
@@ -493,13 +535,16 @@ def wait_for_ssh(
         if status != last:
             say(f"pod {pod_id}: {status}")
             last = status
-        if status in FAILED_STATUSES:
+        if status in failed:
             raise LaunchError(f"pod {pod_id} is {status}")
         endpoint = ssh_endpoint(pod)
         if status == "RUNNING" and endpoint:
             return pod, endpoint
         if clock() >= deadline:
-            raise LaunchError(f"pod {pod_id} did not expose SSH within {timeout_s:.0f}s")
+            raise LaunchError(
+                f"pod {pod_id} did not expose SSH within {timeout_s:.0f}s (after a resume this "
+                "usually means its host has no free GPU right now)"
+            )
         sleep(interval_s)
 
 
@@ -515,6 +560,25 @@ def wait_for_sshd(remote: Remote, attempts: int = 12, sleep: Callable[[float], N
             sleep(10)
 
 
+def _attach_existing(sdk: Any, pod_id: str) -> str:
+    """Check the pod exists; resume it if it is stopped. Returns what was done."""
+    pod = sdk.get_pod(pod_id)
+    status = pod.get("status") if pod else None
+    if status in (None, "TERMINATED"):
+        raise LaunchError(
+            f"pod {pod_id} does not exist (anymore). Empty RUNPOD_POD_ID in .env and run `down` "
+            "or delete gitignore/temp/runpod_pod.json, then `up --yes` creates a new pod."
+        )
+    if status == "ERROR":
+        raise LaunchError(f"pod {pod_id} is in ERROR. Check the RunPod console.")
+    if status == "EXITED":
+        say(f"pod {pod_id} is stopped: resuming it")
+        sdk.resume_pod(pod_id)
+        return "resumed"
+    say(f"pod {pod_id} is {status}: reusing it")
+    return "reused"
+
+
 def up(
     settings: LaunchSettings,
     sdk: Any,
@@ -523,7 +587,12 @@ def up(
     runner: Runner = run_command,
     sleep: Callable[[float], None] = time.sleep,
 ) -> dict[str, Any] | None:
-    """Create the pod and wait for SSH. Without `yes`, print the request and create nothing."""
+    """Reuse (resume) the configured pod or create one, and wait for SSH.
+
+    Without `yes`, print what would happen and do nothing. A new pod above the hourly limit is
+    terminated; any other failure after it is up stops it (files kept) and re-raises."""
+    state = read_state(state_path)
+    pod_id = pod_id_to_use(settings, state)
     try:
         public_key = read_public_key(settings, create=yes, runner=runner)
     except LaunchError as exc:
@@ -531,50 +600,95 @@ def up(
             raise
         say(f"note: {exc}")
         public_key = "<SSH public key>"
-    request = pod_request(settings, public_key)
-    say("create_pod request:\n" + display_request(request))
+    if pod_id:
+        source = "RUNPOD_POD_ID" if settings.pod_id else str(state_path)
+        say(f"would reuse pod {pod_id} (from {source}), resuming it if stopped")
+    else:
+        say("create_pod request:\n" + display_request(pod_request(settings, public_key)))
     if not yes:
-        say("dry run: no pod created. Pass --yes to create it (this starts billing).")
+        say("dry run: nothing created or resumed. Pass --yes to do it (this starts billing).")
         return None
     require_api_key(settings)
-    if state_path.is_file():
-        raise LaunchError(f"A pod is already recorded in {state_path}. Run `down` first.")
-    pod = sdk.create_pod(**request)
-    pod_id = pod["id"]
-    state: dict[str, Any] = {"pod_id": pod_id, "created": datetime.now(UTC).isoformat()}
-    save_state(state, state_path)  # recorded before anything else can fail, so `down` works
-    say(f"created pod {pod_id}")
+
+    created = False
+    if pod_id:
+        action = _attach_existing(sdk, pod_id)
+        state = {**state, "pod_id": pod_id} if state.get("pod_id") == pod_id else {"pod_id": pod_id}
+        failed = tuple(s for s in FAILED_STATUSES if s != "EXITED")
+    else:
+        pod = sdk.create_pod(**pod_request(settings, public_key))
+        pod_id, action, created = pod["id"], "created", True
+        state = {"pod_id": pod_id, "created": datetime.now(UTC).isoformat()}
+        say(f"created pod {pod_id}. To pin it, set RUNPOD_POD_ID={pod_id} in .env")
+        failed = FAILED_STATUSES
+    save_state(state, state_path)  # recorded before anything else can fail, so stop/down work
     try:
+        if created:
+            check_cost(pod, settings.max_hourly_usd)
+        pod, (host, port) = wait_for_ssh(sdk, pod_id, sleep=sleep, failed=failed)
         state["cost_per_hour"] = check_cost(pod, settings.max_hourly_usd)
-        pod, (host, port) = wait_for_ssh(sdk, pod_id, sleep=sleep)
-        state["cost_per_hour"] = check_cost(pod, settings.max_hourly_usd)
-        state.update(host=host, port=port)
+        state.update(host=host, port=port, last_up=datetime.now(UTC).isoformat())
         save_state(state, state_path)
         wait_for_sshd(Remote(host, port, settings.ssh_key, runner=runner), sleep=sleep)
-    except BaseException:
-        say(f"setup failed: terminating pod {pod_id}")
-        down(sdk, state_path)
+    except BaseException as exc:  # also Ctrl+C
+        if created and isinstance(exc, CostLimitError):
+            say(f"{exc}: terminating the new pod {pod_id}")
+            down(sdk, state_path)
+        else:
+            say(f"setup failed: stopping pod {pod_id} (files kept)")
+            _stop_quietly(sdk, state_path)
         raise
     rate = state["cost_per_hour"]
-    say(f"pod {pod_id} ready at {host}:{port}" + (f", ${rate:.3f}/h" if rate else ""))
+    say(f"pod {pod_id} {action}, ready at {host}:{port}" + (f", ${rate:.3f}/h" if rate else ""))
     return state
 
 
+def ensure_idle(remote: Remote) -> None:
+    """Refuse to touch a reused pod while an earlier training job is still running on it."""
+    out = remote.ssh("pgrep -f 'bash run_train.sh' >/dev/null && echo busy || true", capture=True)
+    text = out.stdout.decode() if isinstance(out.stdout, bytes) else str(out.stdout or "")
+    if "busy" in text:
+        raise LaunchError(
+            "a training job is still running on this pod. Wait for it (`status`, `logs`), "
+            "`pull` its results, or stop the pod first."
+        )
+
+
 def push(remote: Remote, data_dir: Path = DATA_DIR, runner: Runner = run_command) -> None:
-    """Upload committed code (git archive HEAD) and the enhanced data."""
+    """Replace the code with HEAD (git archive) and upload the data files that changed."""
+    ensure_idle(remote)
     dirty = runner(["git", "status", "--porcelain"], capture=True).stdout
     if dirty.strip():
         say("warning: uncommitted changes are NOT uploaded; only HEAD is (git archive).")
     archive = runner(["git", "archive", "--format=tar", "HEAD"], capture=True).stdout
-    remote.ssh(f"mkdir -p {REMOTE_DIR} && tar -x -C {REMOTE_DIR}", input=archive)
+    # a fresh folder each time, so files deleted from the repo do not linger on the pod
+    remote.ssh(
+        f"rm -rf {REMOTE_DIR} && mkdir -p {REMOTE_DIR} && tar -x -C {REMOTE_DIR}", input=archive
+    )
     say(f"code: uploaded HEAD ({len(archive) / 1e6:.1f} MB tar)")
     files = [data_dir / name for name in DATA_FILES if (data_dir / name).is_file()]
     if not any(f.name == "train.jsonl" for f in files):
         raise LaunchError(f"{data_dir / 'train.jsonl'} not found. Run the enhancement first.")
-    remote_data = f"{REMOTE_DIR}/{data_dir.as_posix()}"
-    remote.ssh(f"mkdir -p {shlex.quote(remote_data)}")
-    remote.upload(files, remote_data)
-    say("data: uploaded " + ", ".join(f.name for f in files))
+    remote.ssh(f"mkdir -p {REMOTE_DATA}")
+    out = remote.ssh(
+        f"cd {REMOTE_DATA} && sha256sum {' '.join(f.name for f in files)} 2>/dev/null || true",
+        capture=True,
+    ).stdout
+    text = out.decode() if isinstance(out, bytes) else str(out or "")
+    remote_hashes = {
+        parts[1]: parts[0]
+        for parts in (line.split() for line in text.splitlines())
+        if len(parts) == 2
+    }
+    changed = [f for f in files if remote_hashes.get(f.name) != sha256_file(f)]
+    if changed:
+        remote.upload(changed, REMOTE_DATA)
+    unchanged = [f.name for f in files if f not in changed]
+    say(
+        "data: "
+        + (f"uploaded {', '.join(f.name for f in changed)}" if changed else "nothing to upload")
+        + (f"; unchanged on the pod: {', '.join(unchanged)}" if unchanged else "")
+    )
 
 
 def start_training(
@@ -631,13 +745,13 @@ def wait_for_exit(
 
 
 def pull(remote: Remote, run_name: str, dest: Path = CHECKPOINTS_DIR) -> Path:
-    """Copy checkpoints/<run>/ and the pod's run.out back. A missing run dir is reported."""
+    """Copy <run>/ and the pod's run.out back. A missing run dir is reported, not an error."""
     dest.mkdir(parents=True, exist_ok=True)
     local = dest / run_name
     try:
-        remote.download(f"{REMOTE_DIR}/{CHECKPOINTS_DIR.as_posix()}/{run_name}", dest)
+        remote.download(f"{REMOTE_RUNS}/{run_name}", dest)
     except subprocess.CalledProcessError:
-        say(f"warning: no checkpoints/{run_name} on the pod (the run failed before writing it)")
+        say(f"warning: no {run_name} on the pod (the run failed before writing it)")
     local.mkdir(parents=True, exist_ok=True)
     try:
         remote.download(f"{REMOTE_DIR}/run.out", local / "pod_run.out")
@@ -647,11 +761,30 @@ def pull(remote: Remote, run_name: str, dest: Path = CHECKPOINTS_DIR) -> Path:
     return local
 
 
+def _stop_quietly(sdk: Any, state_path: Path = STATE_FILE) -> None:
+    """Stop during error handling: a failure here is reported, the original error is kept."""
+    try:
+        stop(sdk, state_path)
+    except Exception as exc:  # noqa: BLE001
+        say(f"could not stop the pod: {exc}. Run `stop` or use the RunPod console.")
+
+
+def stop(sdk: Any, state_path: Path = STATE_FILE) -> None:
+    """Stop the recorded pod: GPU released, /workspace kept, the pod stays recorded."""
+    state = load_state(state_path)
+    sdk.stop_pod(state["pod_id"])
+    state.pop("host", None)
+    state.pop("port", None)  # a resumed pod may get a new address
+    save_state(state, state_path)
+    say(f"stopped pod {state['pod_id']} (GPU released; storage still billed until `down`)")
+
+
 def down(sdk: Any, state_path: Path = STATE_FILE) -> None:
+    """Terminate the recorded pod for good: its /workspace pod volume is deleted with it."""
     state = load_state(state_path)
     sdk.terminate_pod(state["pod_id"])
     state_path.unlink(missing_ok=True)
-    say(f"terminated pod {state['pod_id']}")
+    say(f"terminated pod {state['pod_id']}. If RUNPOD_POD_ID is set in .env, empty it.")
 
 
 def run_all(
@@ -664,11 +797,13 @@ def run_all(
     runner: Runner = run_command,
     sleep: Callable[[float], None] = time.sleep,
     dest: Path = CHECKPOINTS_DIR,
+    terminate: bool = False,
 ) -> int:
-    """up -> push -> train -> wait -> pull, and always terminate the pod at the end."""
+    """up -> push -> train -> wait -> pull, and always stop (or terminate) the pod at the end."""
     state = up(settings, sdk, yes, state_path, runner, sleep)
     if state is None:  # dry run
         say("remote script:\n" + remote_train_script(settings, run_name, extra_args))
+        say("at the end the pod will be " + ("terminated" if terminate else "stopped (kept)"))
         return 0
     remote = remote_from_state(state, settings, runner)
     started = False
@@ -684,7 +819,7 @@ def run_all(
             if started:
                 pull(remote, run_name, dest)
         finally:
-            down(sdk, state_path)
+            (down if terminate else stop)(sdk, state_path)
 
 
 # --------------------------------------------------------------------------- CLI
@@ -701,9 +836,12 @@ def parse_args(argv: Sequence[str]) -> tuple[argparse.Namespace, list[str]]:
     sub = p.add_subparsers(dest="command", required=True)
     for name in ("up", "run"):
         s = sub.add_parser(name)
-        s.add_argument("--yes", action="store_true", help="really create the pod (billing)")
+        s.add_argument("--yes", action="store_true", help="really create/resume the pod (billing)")
         if name == "run":
             s.add_argument("--run-name")
+            s.add_argument(
+                "--terminate", action="store_true", help="delete the pod at the end (default: stop)"
+            )
     sub.add_parser("push")
     s = sub.add_parser("train")
     s.add_argument("--run-name")
@@ -712,6 +850,7 @@ def parse_args(argv: Sequence[str]) -> tuple[argparse.Namespace, list[str]]:
     s.add_argument("-n", "--lines", type=int, default=40)
     s = sub.add_parser("pull")
     s.add_argument("--run-name", help="default: the last run started with `train`")
+    sub.add_parser("stop")
     sub.add_parser("down")
     return p.parse_args(argv), extra
 
@@ -746,10 +885,16 @@ def _dispatch(args: argparse.Namespace, extra: list[str], settings: LaunchSettin
         return 0
     if cmd == "run":
         sdk = load_sdk(settings) if args.yes else None
-        return run_all(settings, sdk, args.yes, args.run_name or default_run_name(), extra)
-    if cmd == "down":
+        name = args.run_name or default_run_name()
+        return run_all(settings, sdk, args.yes, name, extra, terminate=args.terminate)
+    # RUNPOD_POD_ID wins over the recorded pod; a different pod starts a fresh record
+    recorded = read_state()
+    pod_id = pod_id_to_use(settings, recorded)
+    if pod_id and recorded.get("pod_id") != pod_id:
+        save_state({"pod_id": pod_id})
+    if cmd in ("stop", "down"):
         require_api_key(settings)
-        down(load_sdk(settings))
+        (stop if cmd == "stop" else down)(load_sdk(settings))
         return 0
     state = load_state()
     if cmd == "status":
@@ -757,7 +902,7 @@ def _dispatch(args: argparse.Namespace, extra: list[str], settings: LaunchSettin
         pod = load_sdk(settings).get_pod(state["pod_id"])
         status = pod.get("status") if pod else "not found"
         say(f"pod {state['pod_id']}: {status}, cost {pod.get('cost') if pod else '?'} $/h")
-        if pod and status == "RUNNING" and state.get("run_name"):
+        if pod and status == "RUNNING" and state.get("run_name") and state.get("host"):
             code = remote_exit_code(remote_from_state(state, settings))
             say(f"run {state['run_name']}: " + ("running" if code is None else f"exited {code}"))
         return 0

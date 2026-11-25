@@ -100,35 +100,45 @@ uv run python -m model.train.train --no-progress                                
 
 ## Training on RunPod
 
-`model/train/runpod_launch.py` runs `train.py` on a rented RunPod GPU pod, using the `runpod` SDK (2.4, in the `cloud` dependency group) plus `ssh`/`scp`. Code, data, the venv and the results live on the pod's container disk and are gone after the pod is terminated, so `pull` the results first (`run` does it for you).
-
-### Optional cache volume
-
-Every pod otherwise downloads about 3.5 GB of packages (torch and the CUDA libraries), at whatever speed its host has: about 12 seconds on one pod, about 2.8 MB/s (15–20 minutes) on another, 2026-11-25. With `RUNPOD_NETWORK_VOLUME_ID` set, a RunPod network volume is mounted at `/workspace`, and the download caches go to `/workspace/havelai-cache/`:
-
-- `uv/`: `UV_CACHE_DIR`, the packages for `uv sync`, with `UV_LINK_MODE=copy` because the venv is on another filesystem;
-- `pip/`: `PIP_CACHE_DIR`, for installing uv;
-- `huggingface/`: `HF_HOME`, the mmBERT download.
-
-The first pod fills the cache; later pods install from it. **Only public downloads go on the volume**: no data, no checkpoints, no venv. Results still come back with `pull`. The speed gain has not been measured yet.
-
-Setup, once:
-
-1. Create a network volume in the RunPod console. About 10 GB is enough, in a data center that has RTX 4090s.
-2. Set `RUNPOD_NETWORK_VOLUME_ID` to its id and `RUNPOD_DATA_CENTER` to its data center. The launcher refuses a volume without a data center, because a pod can only attach a volume in its own data center.
-
-Costs and limits:
-
-- The volume is billed monthly per GB **even when no pod runs**. Delete it in the console when you stop training.
-- Pods can only start in that data center. If it has no free 4090, creation fails; leave `RUNPOD_NETWORK_VOLUME_ID` empty to go back to any data center.
+`model/train/runpod_launch.py` runs `train.py` on a rented RunPod GPU pod, using the `runpod` SDK (2.4, in the `cloud` dependency group) plus `ssh`/`scp`. **The pod is kept between runs:** `run` stops it at the end (GPU released, files kept) instead of deleting it, and the next run resumes the same pod.
 
 ```mermaid
 flowchart LR
-    U[up: create_pod<br/>wait for SSH] --> P[push: git archive HEAD<br/>+ scp enhanced data]
-    P --> T[train: uv sync --frozen<br/>CUDA check, timeout train.py]
-    T --> L[pull: scp checkpoints/run]
-    L --> D[down: terminate_pod]
+    U["up: reuse / resume the pod<br/>(or create one)"] --> P["push: git archive HEAD<br/>+ changed data only"]
+    P --> T["train: uv sync --frozen<br/>CUDA check, timeout train.py"]
+    T --> L[pull: scp the run back]
+    L --> S["stop: GPU released,<br/>/workspace kept"]
+    S -. next run .-> U
 ```
+
+### What is kept, and where
+
+A stop wipes the pod's container disk, so everything that should survive lives under `/workspace`:
+
+| Path on the pod | Content |
+|---|---|
+| `/workspace/havelai/` | the code (replaced by `git archive HEAD` on every push), `run_train.sh`, `run.out`, `run.exit` |
+| `/workspace/havelai-venv/` | the venv (`UV_PROJECT_ENVIRONMENT`); `uv sync` only changes what `uv.lock` changed |
+| `/workspace/havelai-data/` | `train.jsonl`, `test.jsonl`; uploaded again only when their SHA-256 differs |
+| `/workspace/havelai-runs/<run>/` | the checkpoints and metrics of each run (`train.py --out-dir`) |
+| `/workspace/havelai-cache/` | uv, pip and Hugging Face download caches |
+
+`/workspace` is a **pod volume** of `RUNPOD_VOLUME_GB` (default 30 GB), or the **network volume** when `RUNPOD_NETWORK_VOLUME_ID` is set:
+
+- **Pod volume:** kept across stops, deleted by `down`.
+- **Network volume:** outlives the pod, can be attached to a new pod, and pins pods to its data center (`RUNPOD_DATA_CENTER` is then required).
+
+The first run on a pod downloads about 3.5 GB of packages, at whatever speed the host has: about 12 seconds on one pod and 15–20 minutes on another, measured 2026-11-25. On later runs the venv is already there, so `uv sync` should be close to a no-op; this has not been measured yet. `uv` itself is reinstalled on each run, because it lives on the container disk, but it comes from the pip cache.
+
+### Which pod is used
+
+1. `RUNPOD_POD_ID` in `.env`, if set;
+2. otherwise the pod recorded in `gitignore/temp/runpod_pod.json` by the last `up`;
+3. otherwise a new pod is created. Its id is printed with a hint to put it in `RUNPOD_POD_ID`.
+
+A pod that is stopped (`EXITED`) is resumed. A pod id that no longer exists is an error: a second pod is never created silently. `push` refuses while a training job from an earlier `train` is still running on the pod.
+
+**Resuming can fail.** A stopped pod restarts on the same host. If that host's GPU is taken, the pod does not come up and `up` gives up after 15 minutes. Then wait and retry, or `down` it and let the next `up` create a new pod.
 
 ### Setup
 
@@ -141,17 +151,19 @@ flowchart LR
 
 | Variable | Default | Meaning |
 |---|---|---|
+| `RUNPOD_POD_ID` | (none) | pod to reuse, resumed if stopped |
 | `RUNPOD_GPU_TYPE` | `NVIDIA GeForce RTX 4090` | GPU type id, 24 GB |
 | `RUNPOD_GPU_COUNT` | 1 | train.py uses one GPU |
 | `RUNPOD_CLOUD_TYPE` | `SECURE` | `SECURE`, `COMMUNITY` or `ALL` |
 | `RUNPOD_IMAGE` | `runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404` | must be a pinned tag. torch comes from `uv.lock`, not from the image |
-| `RUNPOD_CONTAINER_DISK_GB` | 30 | venv, model, data, checkpoints |
+| `RUNPOD_CONTAINER_DISK_GB` | 20 | wiped on every stop; only the OS and uv |
+| `RUNPOD_VOLUME_GB` | 30 | pod volume at `/workspace`, kept across stops (ignored with a network volume) |
 | `RUNPOD_MIN_RAM_GB`, `RUNPOD_MIN_VCPU` | 16, 4 | **placement minimums per GPU, not caps**: RunPod picks a host with at least this much |
 | `RUNPOD_ALLOWED_CUDA` | `13.0,13.1,13.2` | host CUDA versions to accept; torch 2.15 from PyPI ships CUDA 13 libraries. Empty: no filter |
 | `RUNPOD_DATA_CENTER` | (any) | optional, for example `EU-RO-1`. Required with a network volume |
-| `RUNPOD_NETWORK_VOLUME_ID` | (none) | optional cache volume, see above |
+| `RUNPOD_NETWORK_VOLUME_ID` | (none) | use this network volume as `/workspace` instead of a pod volume |
 | `RUNPOD_MAX_HOURS` | 6 | train.py gets SIGINT after this (it exports its partial metrics), and is killed 5 minutes later |
-| `RUNPOD_MAX_HOURLY_USD` | 1.00 | a pod with a higher rate is terminated right after creation |
+| `RUNPOD_MAX_HOURLY_USD` | 1.00 | a new pod with a higher rate is terminated; a reused one is stopped |
 | `RUNPOD_SSH_KEY` | (empty: `gitignore/temp/runpod_ed25519`, created on the first `--yes`) | private key for SSH |
 | `TRAIN_BATCH_SIZE`, `TRAIN_EVAL_BATCH_SIZE`, `TRAIN_GRAD_ACCUM`, `TRAIN_MAX_LENGTH` | 16, 32, 1, 512 | passed to train.py as flags |
 | `TRAIN_GRADIENT_CHECKPOINTING` | 0 | 1 passes `--gradient-checkpointing` |
@@ -162,31 +174,34 @@ Memory is bounded by the GPU you pick (its VRAM) and the TRAIN_* settings. RunPo
 ### Commands
 
 ```bash
-uv run python -m model.train.runpod_launch up                    # dry run: print the create_pod request
-uv run python -m model.train.runpod_launch run                   # dry run: request + the script run on the pod
+uv run python -m model.train.runpod_launch up                    # dry run: which pod, or the create request
+uv run python -m model.train.runpod_launch run                   # dry run: also the script run on the pod
 uv run python -m model.train.runpod_launch run --yes -- --epochs 1 --limit-train 2000   # smoke test
 uv run python -m model.train.runpod_launch run --yes             # full run, default 3 epochs
+uv run python -m model.train.runpod_launch run --yes --terminate # delete the pod at the end instead
 
-# step by step (you must run `down` yourself)
-uv run python -m model.train.runpod_launch up --yes
+# step by step (you must `stop` or `down` yourself)
+uv run python -m model.train.runpod_launch up --yes              # reuse / resume / create
 uv run python -m model.train.runpod_launch push
 uv run python -m model.train.runpod_launch train -- --epochs 3   # detached; args after -- go to train.py
 uv run python -m model.train.runpod_launch status                # pod status, rate, run finished or not
 uv run python -m model.train.runpod_launch logs -n 50
 uv run python -m model.train.runpod_launch pull                  # -> model/train/checkpoints/<run>/
-uv run python -m model.train.runpod_launch down
+uv run python -m model.train.runpod_launch stop                  # release the GPU, keep the pod
+uv run python -m model.train.runpod_launch down                  # delete the pod and its pod volume
 ```
 
-`run` = `up` → `push` → `train` → poll every minute → `pull` → `down`. The pod is terminated in a `finally`, so an error or Ctrl+C also ends billing. The checkpoints are pulled first when training started. The pod's console output is saved as `<run>/pod_run.out`. The pod id, host and port are kept in `gitignore/temp/runpod_pod.json`, with the pod's SSH host key in `gitignore/temp/runpod_known_hosts`. A second `up` is refused while a pod is recorded.
+`run` = `up` → `push` → `train` → poll every minute → `pull` → `stop`. The stop happens in a `finally`, so an error or Ctrl+C also ends GPU billing. When training started, the results are pulled first. The pod's console output is saved as `<run>/pod_run.out`. The pod id, host and port are kept in `gitignore/temp/runpod_pod.json`, and the pod's SSH host key in `gitignore/temp/runpod_known_hosts`.
 
 Exit codes in the pod's `run.exit`: 0 success, 124 `RUNPOD_MAX_HOURS` reached, 3 no usable CUDA on the pod (the driver does not match the locked torch), 130 interrupted; others come from `uv sync` or train.py.
 
 ### Costs and limits
 
-- Nothing is created without `--yes`. The hourly rate (`cost` from the API) is printed when the pod is created.
-- **Step-by-step use bills until `down`.** When `RUNPOD_MAX_HOURS` stops training, the pod itself keeps running until `down`.
-- **`run` needs this machine awake and online.** Polling tolerates up to 10 failed SSH checks in a row (about 10 minutes); after that `run` gives up and tries to terminate the pod (the run is lost). If this machine sleeps, nothing runs, and the pod bills until it wakes. If the network is down, the terminate call can fail too: then run `down` yourself.
-- `status` shows whether a pod is still recorded. In doubt, check the RunPod console.
+- Nothing is created or resumed without `--yes`. The hourly rate (`cost` from the API) is printed when the pod is up.
+- **A stopped pod is not free.** It no longer pays for the GPU, but its volume is still billed until `down`. A network volume is billed until you delete it in the console.
+- **Step-by-step use bills the GPU until `stop` or `down`.** When `RUNPOD_MAX_HOURS` stops training, the pod itself keeps running.
+- **`run` needs this machine awake and online.** Polling tolerates up to 10 failed SSH checks in a row (about 10 minutes); after that `run` gives up and stops the pod. If this machine sleeps, nothing runs, and the pod bills until it wakes. If the network is down, the stop call can fail too: then run `stop` yourself.
+- `status` shows the recorded pod and its state. In doubt, check the RunPod console.
 
 ## Tested and not tested
 

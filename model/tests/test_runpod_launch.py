@@ -1,5 +1,6 @@
 """Offline tests for the RunPod launcher: no network, no ssh, a fake SDK and a fake runner."""
 
+import hashlib
 import shlex
 import subprocess
 from pathlib import Path
@@ -27,18 +28,29 @@ RUNNING_POD = {
 
 
 class FakeSdk:
-    def __init__(self, created=None, polled=None):
+    """`existing`: what get_pod returns before any polling (for reused pods)."""
+
+    def __init__(self, created=None, polled=None, existing=None):
         self.created = created or {"id": "pod1", "status": "PROVISIONING", "cost": 0.69}
+        self.existing = existing
         self.polled = list(polled or [RUNNING_POD])
-        self.requests = []
-        self.terminated = []
+        self.requests, self.terminated, self.stopped, self.resumed = [], [], [], []
 
     def create_pod(self, **kwargs):
         self.requests.append(kwargs)
         return self.created
 
     def get_pod(self, pod_id):
+        if self.existing is not None:
+            pod, self.existing = self.existing, None
+            return pod or None
         return self.polled.pop(0) if len(self.polled) > 1 else self.polled[0]
+
+    def stop_pod(self, pod_id):
+        self.stopped.append(pod_id)
+
+    def resume_pod(self, pod_id):
+        self.resumed.append(pod_id)
 
     def terminate_pod(self, pod_id):
         self.terminated.append(pod_id)
@@ -47,11 +59,13 @@ class FakeSdk:
 class FakeRunner:
     """Records commands. `fail_on` makes a command containing that text raise."""
 
-    def __init__(self, fail_on=None, exit_code=b"0\n", dirty=b""):
+    def __init__(self, fail_on=None, exit_code=b"0\n", dirty=b"", hashes=b"", busy=False):
         self.calls = []
         self.fail_on = fail_on
         self.exit_code = exit_code
         self.dirty = dirty
+        self.hashes = hashes
+        self.busy = busy
 
     def __call__(self, argv, input=None, capture=False):
         self.calls.append((list(argv), input))
@@ -63,6 +77,10 @@ class FakeRunner:
             out = self.dirty
         elif argv[:2] == ["git", "archive"]:
             out = b"TAR"
+        elif joined.startswith("ssh") and "pgrep" in joined:
+            out = b"busy\n" if self.busy else b""
+        elif joined.startswith("ssh") and "sha256sum" in joined:
+            out = self.hashes
         elif "run.exit" in joined and joined.startswith("ssh") and "cat " in joined:
             out = self.exit_code
         return subprocess.CompletedProcess(argv, 0, stdout=out, stderr=b"")
@@ -78,6 +96,13 @@ def _data(tmp_path: Path) -> Path:
     return d
 
 
+def _up(tmp_path, sdk, runner=None, **overrides):
+    return rl.up(
+        _settings(tmp_path, **overrides), sdk, True, tmp_path / "s.json",
+        runner or FakeRunner(), sleep=lambda s: None,
+    )  # fmt: skip
+
+
 # ---- settings
 
 
@@ -85,8 +110,9 @@ def test_settings_defaults_when_env_is_empty():
     s = rl.settings_from_env({})
     assert s.gpu_type == "NVIDIA GeForce RTX 4090"
     assert s.cloud_type == "SECURE"
-    assert s.api_key == ""
+    assert s.api_key == "" and s.pod_id is None
     assert s.allowed_cuda == rl.DEFAULT_ALLOWED_CUDA
+    assert (s.container_disk_gb, s.volume_gb) == (20, 30)
     assert s.gradient_checkpointing is False
 
 
@@ -94,9 +120,11 @@ def test_settings_parse_values():
     s = rl.settings_from_env(
         {
             "RUNPOD_API_KEY": "k",
+            "RUNPOD_POD_ID": " abc123 ",
             "RUNPOD_GPU_TYPE": "NVIDIA RTX A4000",
             "RUNPOD_CLOUD_TYPE": "community",
             "RUNPOD_CONTAINER_DISK_GB": "40",
+            "RUNPOD_VOLUME_GB": "50",
             "RUNPOD_MIN_RAM_GB": "8",
             "RUNPOD_ALLOWED_CUDA": "",
             "RUNPOD_MAX_HOURS": "1.5",
@@ -106,8 +134,9 @@ def test_settings_parse_values():
             "TRAIN_GRADIENT_CHECKPOINTING": "1",
         }
     )
+    assert s.pod_id == "abc123"
     assert s.cloud_type == "COMMUNITY"
-    assert s.container_disk_gb == 40 and s.min_ram_gb == 8
+    assert (s.container_disk_gb, s.volume_gb, s.min_ram_gb) == (40, 50, 8)
     assert s.allowed_cuda == ()  # empty means no CUDA filter
     assert s.max_hours == 1.5
     assert s.ssh_key == Path("~/k").expanduser()
@@ -120,16 +149,26 @@ def test_settings_parse_values():
         {"RUNPOD_GPU_COUNT": "two"},
         {"RUNPOD_GPU_COUNT": "0"},
         {"RUNPOD_CONTAINER_DISK_GB": "5"},
+        {"RUNPOD_VOLUME_GB": "5"},
         {"RUNPOD_CLOUD_TYPE": "CHEAP"},
         {"RUNPOD_IMAGE": "runpod/pytorch:latest"},
         {"RUNPOD_IMAGE": "runpod/pytorch"},
         {"RUNPOD_MAX_HOURLY_USD": "-1"},
         {"TRAIN_GRADIENT_CHECKPOINTING": "maybe"},
+        {"RUNPOD_NETWORK_VOLUME_ID": "vol123"},  # needs RUNPOD_DATA_CENTER
     ],
 )
 def test_bad_settings_fail_clearly(env):
     with pytest.raises(rl.LaunchError):
         rl.settings_from_env(env)
+
+
+def test_missing_api_key_is_an_error():
+    with pytest.raises(rl.LaunchError, match="RUNPOD_API_KEY"):
+        rl.require_api_key(rl.LaunchSettings())
+
+
+# ---- ssh key
 
 
 class KeygenRunner(FakeRunner):
@@ -180,11 +219,6 @@ def test_up_with_yes_creates_the_own_key_then_the_pod(tmp_path, monkeypatch):
     assert any(f"-i {auto}" in c for c in runner.commands())
 
 
-def test_missing_api_key_is_an_error():
-    with pytest.raises(rl.LaunchError, match="RUNPOD_API_KEY"):
-        rl.require_api_key(rl.LaunchSettings())
-
-
 # ---- pod request
 
 
@@ -193,8 +227,7 @@ def test_pod_request_sizes_the_pod_and_keeps_the_api_key_local(tmp_path):
     req = rl.pod_request(s, "ssh-ed25519 AAAA")
     assert req["gpu_type_id"] == "NVIDIA GeForce RTX 4090"
     assert req["gpu_count"] == 1
-    assert req["container_disk_in_gb"] == 30
-    assert req["volume_in_gb"] == 0
+    assert req["container_disk_in_gb"] == 20
     assert req["min_memory_in_gb"] == 16 and req["min_vcpu_count"] == 4
     assert req["ports"] == "22/tcp" and req["start_ssh"] is True
     assert req["data_center_id"] == "EU-RO-1"
@@ -210,42 +243,23 @@ def test_pod_request_matches_the_sdk_signature(tmp_path):
     inspect = pytest.importorskip("inspect")
     ctl = pytest.importorskip("runpod.api.ctl_commands")
     params = inspect.signature(ctl.create_pod).parameters
-    assert set(rl.pod_request(_settings(tmp_path, data_center="X"), "k")) <= set(params)
+    s = _settings(tmp_path, data_center="X", network_volume_id="v")
+    assert set(rl.pod_request(s, "k")) <= set(params)
 
 
-def test_no_network_volume_by_default(tmp_path):
+def test_workspace_is_a_pod_volume_by_default(tmp_path):
     req = rl.pod_request(_settings(tmp_path), "k")
-    assert "network_volume_id" not in req and "volume_mount_path" not in req
-    script = rl.remote_train_script(rl.LaunchSettings(), "r")
-    assert "UV_CACHE_DIR" not in script and "HF_HOME" not in script
+    assert req["volume_in_gb"] == 30 and req["volume_mount_path"] == "/workspace"
+    assert "network_volume_id" not in req
 
 
-def test_network_volume_is_mounted_and_holds_only_the_caches(tmp_path):
+def test_workspace_is_the_network_volume_when_set():
     s = rl.settings_from_env(
         {"RUNPOD_NETWORK_VOLUME_ID": "vol123", "RUNPOD_DATA_CENTER": "EU-RO-1"}
     )
-    assert (s.network_volume_id, s.data_center) == ("vol123", "EU-RO-1")
     req = rl.pod_request(s, "k")
-    assert req["network_volume_id"] == "vol123"
-    assert req["volume_mount_path"] == rl.VOLUME_MOUNT == "/workspace"
-    assert req["data_center_id"] == "EU-RO-1"
-    assert req["volume_in_gb"] == 0
-    script = rl.remote_train_script(s, "r")
-    for line in (
-        f"export UV_CACHE_DIR={rl.CACHE_DIR}/uv",
-        "export UV_LINK_MODE=copy",
-        f"export PIP_CACHE_DIR={rl.CACHE_DIR}/pip",
-        f"export HF_HOME={rl.CACHE_DIR}/huggingface",
-    ):
-        assert line in script
-    # caches are set before anything downloads; data, venv and checkpoints stay off the volume
-    assert script.index("UV_CACHE_DIR") < script.index("pip install") < script.index("uv sync")
-    assert f"cd {rl.REMOTE_DIR}" in script and rl.REMOTE_DIR.startswith("/root/")
-
-
-def test_network_volume_needs_its_data_center():
-    with pytest.raises(rl.LaunchError, match="RUNPOD_DATA_CENTER"):
-        rl.settings_from_env({"RUNPOD_NETWORK_VOLUME_ID": "vol123"})
+    assert req["network_volume_id"] == "vol123" and req["data_center_id"] == "EU-RO-1"
+    assert req["volume_in_gb"] == 0 and req["volume_mount_path"] == "/workspace"
 
 
 def test_display_request_shortens_the_public_key():
@@ -311,55 +325,136 @@ def test_remote_script_quotes_arguments_and_bounds_time():
     assert "RUNPOD_API_KEY" not in script
 
 
-# ---- steps with a fake SDK and runner
+def test_remote_script_keeps_everything_under_workspace():
+    script = rl.remote_train_script(rl.LaunchSettings(), "r")
+    for line in (
+        f"export UV_CACHE_DIR={rl.CACHE_DIR}/uv",
+        f"export PIP_CACHE_DIR={rl.CACHE_DIR}/pip",
+        f"export HF_HOME={rl.CACHE_DIR}/huggingface",
+        f"export UV_PROJECT_ENVIRONMENT={rl.REMOTE_VENV}",
+    ):
+        assert line in script
+    assert f"--data-dir {rl.REMOTE_DATA} --out-dir {rl.REMOTE_RUNS}" in script
+    for path in (rl.REMOTE_DIR, rl.REMOTE_VENV, rl.REMOTE_DATA, rl.REMOTE_RUNS, rl.CACHE_DIR):
+        assert path.startswith("/workspace/"), "must survive a stop"
+    # caches and venv are set before anything downloads
+    assert script.index("UV_CACHE_DIR") < script.index("pip install") < script.index("uv sync")
+
+
+def test_remote_script_args_are_accepted_by_train_py():
+    """The data/out dirs and flags the launcher adds parse with train.py's own parser."""
+    s = rl.LaunchSettings()
+    args = shlex.split(rl.remote_train_script(s, "r", ["--epochs", "1"]).splitlines()[-1])
+    cfg_args = tr.parse_args(args[args.index("model.train.train") + 1 :])
+    assert str(cfg_args.data_dir) == rl.REMOTE_DATA and str(cfg_args.out_dir) == rl.REMOTE_RUNS
+    assert cfg_args.epochs == 1
+
+
+# ---- up: create, reuse, resume
 
 
 def test_up_without_yes_creates_nothing(tmp_path):
     sdk = FakeSdk()
     assert rl.up(_settings(tmp_path), sdk, yes=False, state_path=tmp_path / "s.json") is None
-    assert sdk.requests == [] and not (tmp_path / "s.json").exists()
+    assert sdk.requests == [] and sdk.resumed == [] and not (tmp_path / "s.json").exists()
 
 
-def test_up_creates_waits_and_records_the_pod(tmp_path):
-    sdk, runner, state_path = FakeSdk(), FakeRunner(), tmp_path / "s.json"
-    state = rl.up(_settings(tmp_path), sdk, True, state_path, runner, sleep=lambda s: None)
+def test_up_creates_a_pod_and_records_it(tmp_path, capsys):
+    sdk = FakeSdk()
+    state = _up(tmp_path, sdk)
     assert state["pod_id"] == "pod1" and (state["host"], state["port"]) == ("1.2.3.4", 40022)
-    assert rl.load_state(state_path)["pod_id"] == "pod1"
-    assert sdk.terminated == []
+    assert rl.load_state(tmp_path / "s.json")["pod_id"] == "pod1"
+    assert sdk.terminated == [] and sdk.stopped == []
+    assert "RUNPOD_POD_ID=pod1" in capsys.readouterr().err
 
 
-def test_up_terminates_a_pod_above_the_hourly_limit(tmp_path):
-    sdk, state_path = FakeSdk(created={"id": "pod1", "cost": 3.5}), tmp_path / "s.json"
-    s = _settings(tmp_path, max_hourly_usd=1.0)
-    with pytest.raises(rl.LaunchError, match="RUNPOD_MAX_HOURLY_USD"):
-        rl.up(s, sdk, True, state_path, FakeRunner(), sleep=lambda s: None)
-    assert sdk.terminated == ["pod1"] and not state_path.exists()
+def test_up_reuses_the_recorded_pod_instead_of_creating(tmp_path):
+    rl.save_state({"pod_id": "pod1"}, tmp_path / "s.json")
+    sdk = FakeSdk(existing=RUNNING_POD)
+    _up(tmp_path, sdk)
+    assert sdk.requests == [] and sdk.resumed == []
 
 
-def test_up_terminates_a_pod_that_fails_to_start(tmp_path):
+def test_up_resumes_a_stopped_pod(tmp_path):
+    sdk = FakeSdk(existing={"id": "pod1", "status": "EXITED"}, polled=[
+        {"id": "pod1", "status": "EXITED"},  # still reported as stopped right after resume
+        RUNNING_POD,
+    ])  # fmt: skip
+    state = _up(tmp_path, sdk, pod_id="pod1")
+    assert sdk.resumed == ["pod1"] and sdk.requests == []
+    assert state["host"] == "1.2.3.4"
+
+
+def test_runpod_pod_id_wins_over_the_recorded_pod(tmp_path):
+    rl.save_state({"pod_id": "old", "host": "9.9.9.9", "port": 1}, tmp_path / "s.json")
+    sdk = FakeSdk(existing=RUNNING_POD)
+    state = _up(tmp_path, sdk, pod_id="pod1")
+    assert state["pod_id"] == "pod1" and state["host"] == "1.2.3.4"
+
+
+@pytest.mark.parametrize("existing", [{}, {"id": "pod1", "status": "TERMINATED"}])
+def test_a_pod_id_that_no_longer_exists_fails_clearly(tmp_path, existing):
+    sdk = FakeSdk(existing=existing)
+    with pytest.raises(rl.LaunchError, match="RUNPOD_POD_ID"):
+        _up(tmp_path, sdk, pod_id="gone")
+    assert sdk.requests == [], "never silently create a second pod"
+
+
+def test_up_terminates_a_new_pod_above_the_hourly_limit(tmp_path):
+    sdk = FakeSdk(created={"id": "pod1", "cost": 3.5})
+    with pytest.raises(rl.CostLimitError):
+        _up(tmp_path, sdk, max_hourly_usd=1.0)
+    assert sdk.terminated == ["pod1"] and not (tmp_path / "s.json").exists()
+
+
+def test_up_stops_a_reused_pod_above_the_hourly_limit(tmp_path):
+    sdk = FakeSdk(
+        existing={"id": "pod1", "status": "EXITED"}, polled=[{**RUNNING_POD, "cost": 3.5}]
+    )
+    with pytest.raises(rl.CostLimitError):
+        _up(tmp_path, sdk, pod_id="pod1", max_hourly_usd=1.0)
+    assert sdk.stopped == ["pod1"] and sdk.terminated == []
+
+
+def test_up_stops_a_pod_that_fails_to_start(tmp_path):
     sdk = FakeSdk(polled=[{"id": "pod1", "status": "ERROR"}])
     with pytest.raises(rl.LaunchError, match="ERROR"):
-        rl.up(_settings(tmp_path), sdk, True, tmp_path / "s.json", FakeRunner(), lambda s: None)
-    assert sdk.terminated == ["pod1"]
+        _up(tmp_path, sdk)
+    assert sdk.stopped == ["pod1"] and sdk.terminated == []
+    assert rl.load_state(tmp_path / "s.json")["pod_id"] == "pod1", "kept for the next run"
 
 
-def test_up_refuses_a_second_pod(tmp_path):
-    state_path = tmp_path / "s.json"
-    rl.save_state({"pod_id": "old"}, state_path)
-    with pytest.raises(rl.LaunchError, match="down"):
-        rl.up(_settings(tmp_path), FakeSdk(), True, state_path, FakeRunner())
+# ---- push
 
 
-def test_push_sends_head_only_and_the_data(tmp_path, capsys):
+def test_push_replaces_the_code_and_uploads_the_data(tmp_path, capsys):
     runner = FakeRunner(dirty=b" M model/train/train.py\n")
     remote = rl.Remote("1.2.3.4", 40022, tmp_path / "k", tmp_path / "kh", runner=runner)
     rl.push(remote, _data(tmp_path), runner=runner)
     cmds = runner.commands()
     assert any(c.startswith("git archive --format=tar HEAD") for c in cmds)
     tar_call = next(c for c in runner.calls if "tar -x" in " ".join(c[0]))
-    assert tar_call[1] == b"TAR"
-    assert any(c.startswith("scp") and "train.jsonl" in c for c in cmds)
+    assert tar_call[1] == b"TAR" and f"rm -rf {rl.REMOTE_DIR}" in " ".join(tar_call[0])
+    assert any(c.startswith("scp") and "train.jsonl" in c and rl.REMOTE_DATA in c for c in cmds)
     assert "uncommitted changes are NOT uploaded" in capsys.readouterr().err
+
+
+def test_push_skips_data_that_is_already_on_the_pod(tmp_path, capsys):
+    data = _data(tmp_path)
+    digest = hashlib.sha256((data / "train.jsonl").read_bytes()).hexdigest()
+    runner = FakeRunner(hashes=f"{digest}  train.jsonl\n".encode())
+    remote = rl.Remote("h", 1, tmp_path / "k", tmp_path / "kh", runner=runner)
+    rl.push(remote, data, runner=runner)
+    assert not any(c.startswith("scp") for c in runner.commands())
+    assert "nothing to upload" in capsys.readouterr().err
+
+
+def test_push_refuses_while_a_training_job_runs(tmp_path):
+    runner = FakeRunner(busy=True)
+    remote = rl.Remote("h", 1, tmp_path / "k", tmp_path / "kh", runner=runner)
+    with pytest.raises(rl.LaunchError, match="still running"):
+        rl.push(remote, _data(tmp_path), runner=runner)
+    assert not any("rm -rf" in c for c in runner.commands())
 
 
 def test_push_needs_train_jsonl(tmp_path):
@@ -379,6 +474,29 @@ def test_ssh_options_use_the_key_and_a_private_known_hosts(tmp_path):
     assert "-P" in remote.upload_argv([Path("a")], "/r")
 
 
+# ---- stop / down
+
+
+def test_stop_keeps_the_pod_recorded_but_forgets_its_address(tmp_path):
+    state_path = tmp_path / "s.json"
+    rl.save_state({"pod_id": "pod1", "host": "h", "port": 1}, state_path)
+    sdk = FakeSdk()
+    rl.stop(sdk, state_path)
+    assert sdk.stopped == ["pod1"]
+    assert rl.load_state(state_path) == {"pod_id": "pod1"}
+
+
+def test_down_terminates_and_forgets(tmp_path):
+    state_path = tmp_path / "s.json"
+    rl.save_state({"pod_id": "pod1"}, state_path)
+    sdk = FakeSdk()
+    rl.down(sdk, state_path)
+    assert sdk.terminated == ["pod1"] and not state_path.exists()
+
+
+# ---- run_all
+
+
 @pytest.fixture
 def in_project(tmp_path, monkeypatch):
     """Run in an empty folder with only model/train/data/enhanced/train.jsonl."""
@@ -389,39 +507,48 @@ def in_project(tmp_path, monkeypatch):
     return tmp_path
 
 
-def test_run_all_trains_pulls_and_terminates(tmp_path, in_project):
-    sdk, runner = FakeSdk(), FakeRunner(exit_code=b"0\n")
-    code = rl.run_all(
-        _settings(tmp_path), sdk, True, "run-1", ["--epochs", "1"],
+def _run(tmp_path, sdk, runner, **kwargs):
+    return rl.run_all(
+        _settings(tmp_path), sdk, True, "run-1", kwargs.pop("extra", ()),
         state_path=tmp_path / "s.json", runner=runner, sleep=lambda s: None,
-        dest=tmp_path / "ckpt",
+        dest=tmp_path / "ckpt", **kwargs,
     )  # fmt: skip
-    assert code == 0
-    assert sdk.terminated == ["pod1"]
+
+
+def test_run_all_trains_pulls_and_stops_the_pod(tmp_path, in_project):
+    sdk, runner = FakeSdk(), FakeRunner(exit_code=b"0\n")
+    assert _run(tmp_path, sdk, runner, extra=["--epochs", "1"]) == 0
+    assert sdk.stopped == ["pod1"] and sdk.terminated == []
+    assert rl.load_state(tmp_path / "s.json")["pod_id"] == "pod1", "kept for the next run"
     cmds = runner.commands()
     assert any("run_train.sh" in c and "nohup" in c for c in cmds)
-    assert any(c.startswith("scp -r") and "checkpoints/run-1" in c for c in cmds)
+    assert any(c.startswith("scp -r") and f"{rl.REMOTE_RUNS}/run-1" in c for c in cmds)
 
 
-@pytest.mark.parametrize("fail_on", ["git archive", "nohup"])
-def test_run_all_terminates_the_pod_when_a_step_fails(tmp_path, in_project, fail_on):
-    sdk, runner = FakeSdk(), FakeRunner(fail_on=fail_on)
-    with pytest.raises(subprocess.CalledProcessError):
-        rl.run_all(
-            _settings(tmp_path), sdk, True, "run-1",
-            state_path=tmp_path / "s.json", runner=runner, sleep=lambda s: None,
-            dest=tmp_path / "ckpt",
-        )  # fmt: skip
-    assert sdk.terminated == ["pod1"]
+def test_run_all_can_terminate_instead(tmp_path, in_project):
+    sdk = FakeSdk()
+    _run(tmp_path, sdk, FakeRunner(), terminate=True)
+    assert sdk.terminated == ["pod1"] and sdk.stopped == []
     assert not (tmp_path / "s.json").exists()
 
 
-def test_run_all_dry_run_prints_and_creates_nothing(tmp_path, capsys):
+@pytest.mark.parametrize("fail_on", ["git archive", "nohup"])
+def test_run_all_stops_the_pod_when_a_step_fails(tmp_path, in_project, fail_on):
+    sdk = FakeSdk()
+    with pytest.raises(subprocess.CalledProcessError):
+        _run(tmp_path, sdk, FakeRunner(fail_on=fail_on))
+    assert sdk.stopped == ["pod1"] and sdk.terminated == []
+
+
+def test_run_all_dry_run_prints_and_does_nothing(tmp_path, capsys):
     sdk = FakeSdk()
     assert rl.run_all(_settings(tmp_path), sdk, False, "run-1", state_path=tmp_path / "s") == 0
-    assert sdk.requests == []
+    assert sdk.requests == [] and sdk.stopped == [] and sdk.resumed == []
     err = capsys.readouterr().err
-    assert "dry run" in err and "remote script" in err
+    assert "dry run" in err and "remote script" in err and "stopped (kept)" in err
+
+
+# ---- waiting
 
 
 def test_wait_for_exit_times_out(tmp_path):
@@ -457,7 +584,11 @@ def test_wait_for_exit_gives_up_after_too_many_failed_polls(tmp_path):
         rl.wait_for_exit(remote, 10_000, sleep=lambda s: None, max_failures=4)
 
 
+# ---- CLI
+
+
 def test_parse_args_passes_everything_after_double_dash_to_train():
-    args, extra = rl.parse_args(["run", "--yes", "--", "--epochs", "1", "--yes"])
-    assert args.command == "run" and args.yes is True
+    args, extra = rl.parse_args(["run", "--yes", "--terminate", "--", "--epochs", "1", "--yes"])
+    assert args.command == "run" and args.yes is True and args.terminate is True
     assert extra == ["--epochs", "1", "--yes"]
+    assert rl.parse_args(["stop"])[0].command == "stop"
