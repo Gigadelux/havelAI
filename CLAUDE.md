@@ -1,6 +1,6 @@
 # CLAUDE.md — havelAI
 
-_Last updated: 2026-11-21_
+_Last updated: 2026-11-25_
 
 ## What this project is
 **havelAI** is a small Python library for detecting and classifying **prompt-injection attacks**. It has two parts:
@@ -67,6 +67,7 @@ Details live in `docs/`; keep them there, not here. The root `ARCHITECTURE.md` d
 
 - **Data enhancement** (`model/train/enhance_pipeline.py`, see `docs/ENHANCEMENT_PIPELINE.md`): relabels `jayavibhav/prompt-injection` (binary) with an attack type using Jev (`typesafe/jev-1.14`) on OpenRouter. Only label-1 rows are sent; output is resumable JSONL in `model/train/data/enhanced/`. Pin the model version, never `~typesafe/jev-latest`.
 - **Training** (`model/train/train.py`, see `docs/TRAINING.md`): fine-tunes mmBERT with tqdm progress bars and logging (stderr + `train.log`, never dataset text), on the enhanced data, and writes `model/train/checkpoints/<run>/` (gitignored), including a `metrics/` folder with JSON tables and PNG plots from `model/train/metrics.py`. Headline metric is injection vs benign against the dataset's original `label`; attack-type metrics only measure agreement with Jev.
+- **Training on RunPod** (`model/train/runpod_launch.py`, see `docs/TRAINING.md`): training runs on a RunPod GPU pod over SSH (it ran out of memory locally on MPS). Pod size (RUNPOD_*) and training memory (TRAIN_*) come from `.env`. Creating a pod costs money: dry run first, `--yes` only with the owner's go-ahead. `runpod` lives in the `cloud` dependency group, not in the `model` extra.
 - **Model design** (`model/architecture.py`, see `docs/MODEL_ARCHITECTURE.md`): target is mmBERT-small, 32k vocabulary, int8, binary + attack-type heads, model file at most 256 MB, no second model trained for memory. `model/architecture.py` defines the two-head model; `train.py` still trains the single-head baseline, and vocabulary pruning and the int8 export are not built (see that doc).
 
 ```bash
@@ -102,6 +103,7 @@ uv run python -m model.train.train --dry-run                                    
 ## Commands
 ```bash
 uv sync --extra model        # install library + training/data tooling
+uv sync --extra model --group cloud   # + runpod SDK for model/train/runpod_launch.py
 uv run ruff check . && uv run ruff format .
 uv run pytest                # src/tests and model/tests
 uv run python -m model.train.train --dry-run   # check the enhanced data before training

@@ -365,6 +365,14 @@ def test_main_trains_end_to_end_and_writes_logs_and_metrics(tiny_checkpoint, tmp
     assert SECRET not in err
 
 
+def test_gradient_checkpointing_flag_trains_end_to_end(tiny_checkpoint, tmp_path):
+    args = _main_args(tmp_path, tiny_checkpoint, "--gradient-checkpointing", "--no-progress")
+    assert tr.main(args) == 0
+    log = (tmp_path / "out" / "r" / "train.log").read_text()
+    assert "gradient checkpointing enabled" in log
+    assert '"gradient_checkpointing": true' in log
+
+
 def test_a_failing_run_is_logged_with_a_traceback_and_partial_metrics_survive(
     tiny_checkpoint, tmp_path, monkeypatch
 ):

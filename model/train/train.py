@@ -108,6 +108,7 @@ class TrainConfig:
     min_confidence: float = 0.6
     class_weights: str = "sqrt_inverse"  # none | sqrt_inverse
     limit_train: int | None = None
+    gradient_checkpointing: bool = False  # trade compute for activation memory
 
 
 # --------------------------------------------------------------------------- data
@@ -541,6 +542,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--min-confidence", type=float, default=d.min_confidence)
     p.add_argument("--class-weights", choices=["none", "sqrt_inverse"], default=d.class_weights)
     p.add_argument("--limit-train", type=int, help="use at most N training rows (quick trials)")
+    p.add_argument(
+        "--gradient-checkpointing",
+        action="store_true",
+        help="recompute activations in the backward pass: less memory, slower steps",
+    )
     p.add_argument("--device", default="auto", help="auto, cuda, mps or cpu")
     p.add_argument("--dry-run", action="store_true", help="print the data report and stop")
     p.add_argument("--no-progress", action="store_true", help="turn off the tqdm progress bars")
@@ -659,6 +665,14 @@ def _run(args: argparse.Namespace, cfg: TrainConfig) -> int:
     with logging_redirect_tqdm(loggers=[logger]):  # log lines do not break the progress bars
         try:
             tokenizer, model = build_classifier(cfg.model)
+            if cfg.gradient_checkpointing:
+                if getattr(model, "supports_gradient_checkpointing", False):
+                    # transformers 5.x renamed it; the old name warns and goes away in v6
+                    enable = getattr(model, "activation_checkpointing_enable", None)
+                    (enable or model.gradient_checkpointing_enable)()
+                    logger.info("gradient checkpointing enabled")
+                else:
+                    logger.warning("this model does not support gradient checkpointing; ignored")
 
             def save_best(m: Any) -> None:
                 m.save_pretrained(best_dir)

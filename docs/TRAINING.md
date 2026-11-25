@@ -1,6 +1,6 @@
 # Training
 
-_Last updated: 2026-11-21_
+_Last updated: 2026-11-25_
 
 `model/train/train.py` fine-tunes mmBERT on the enhanced data and evaluates the best epoch on the test split. All metric computation, tracking and plotting live in `model/train/metrics.py`; `train.py` only calls it. The model itself is described in [`MODEL_ARCHITECTURE.md`](MODEL_ARCHITECTURE.md); the data comes from [`ENHANCEMENT_PIPELINE.md`](ENHANCEMENT_PIPELINE.md).
 
@@ -29,6 +29,8 @@ flowchart LR
 Plain PyTorch: AdamW (no weight decay on bias and norm parameters), linear warmup and decay, weighted cross-entropy (`--class-weights sqrt_inverse`, the square root of balanced weights; `none` to disable), gradient accumulation, gradient clipping, bf16 autocast on CUDA, dynamic padding. Device is chosen automatically: cuda, then mps, then cpu. The best epoch is chosen by validation macro-F1 over attack types, saved on each improvement, and reloaded from disk before testing.
 
 Defaults (3 epochs, batch 16, lr 3e-5, max length 512) are common starting points and have not been tuned.
+
+`--gradient-checkpointing` recomputes activations in the backward pass: less GPU memory, slower steps. Memory scales with batch size × max length, so with less memory lower `--batch-size` and raise `--grad-accum` to keep the same effective batch. Locally on MPS, batch 16 at 512 tokens ran out of memory on the first training batch (2026-11-21 run); that is why training moved to RunPod (below).
 
 ## Console output and logs
 
@@ -96,6 +98,77 @@ uv run python -m model.train.train                                              
 uv run python -m model.train.train --no-progress                                         # no progress bars (CI, redirected output)
 ```
 
+## Training on RunPod
+
+`model/train/runpod_launch.py` runs `train.py` on a rented RunPod GPU pod, using the `runpod` SDK (2.4, in the `cloud` dependency group) plus `ssh`/`scp`. There is no network volume: everything lives on the pod's container disk and is gone after the pod is terminated, so `pull` the results first (`run` does it for you).
+
+```mermaid
+flowchart LR
+    U[up: create_pod<br/>wait for SSH] --> P[push: git archive HEAD<br/>+ scp enhanced data]
+    P --> T[train: uv sync --frozen<br/>CUDA check, timeout train.py]
+    T --> L[pull: scp checkpoints/run]
+    L --> D[down: terminate_pod]
+```
+
+### Setup
+
+1. `uv sync --extra model --group cloud`.
+2. In `.env` (see `example.env`): `RUNPOD_API_KEY`, and adjust the RUNPOD_* and TRAIN_* settings if you want. The API key is the only value you must fill in.
+3. Nothing to do for SSH: with `RUNPOD_SSH_KEY` empty, the first `--yes` creates a passphrase-less ed25519 key in `gitignore/temp/runpod_ed25519` (mode 600, gitignored) that is used only for RunPod pods. Only the `.pub` is sent, as the pod's `PUBLIC_KEY`; nothing has to be added to your RunPod account. To use your own key instead, set `RUNPOD_SSH_KEY` to its path; that key is never generated or changed.
+4. **Commit first.** Only `HEAD` is uploaded (`git archive`); uncommitted changes are not, and a warning says so.
+
+### Settings (`.env`)
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `RUNPOD_GPU_TYPE` | `NVIDIA GeForce RTX 4090` | GPU type id, 24 GB |
+| `RUNPOD_GPU_COUNT` | 1 | train.py uses one GPU |
+| `RUNPOD_CLOUD_TYPE` | `SECURE` | `SECURE`, `COMMUNITY` or `ALL` |
+| `RUNPOD_IMAGE` | `runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404` | must be a pinned tag. torch comes from `uv.lock`, not from the image |
+| `RUNPOD_CONTAINER_DISK_GB` | 30 | venv, model, data, checkpoints |
+| `RUNPOD_MIN_RAM_GB`, `RUNPOD_MIN_VCPU` | 16, 4 | **placement minimums per GPU, not caps**: RunPod picks a host with at least this much |
+| `RUNPOD_ALLOWED_CUDA` | `13.0,13.1,13.2` | host CUDA versions to accept; torch 2.15 from PyPI ships CUDA 13 libraries. Empty: no filter |
+| `RUNPOD_DATA_CENTER` | (any) | optional, for example `EU-RO-1` |
+| `RUNPOD_MAX_HOURS` | 6 | train.py gets SIGINT after this (it exports its partial metrics), and is killed 5 minutes later |
+| `RUNPOD_MAX_HOURLY_USD` | 1.00 | a pod with a higher rate is terminated right after creation |
+| `RUNPOD_SSH_KEY` | (empty: `gitignore/temp/runpod_ed25519`, created on the first `--yes`) | private key for SSH |
+| `TRAIN_BATCH_SIZE`, `TRAIN_EVAL_BATCH_SIZE`, `TRAIN_GRAD_ACCUM`, `TRAIN_MAX_LENGTH` | 16, 32, 1, 512 | passed to train.py as flags |
+| `TRAIN_GRADIENT_CHECKPOINTING` | 0 | 1 passes `--gradient-checkpointing` |
+| `PYTORCH_CUDA_ALLOC_CONF` | `expandable_segments:True` | set on the pod, reduces CUDA memory fragmentation |
+
+Memory is bounded by the GPU you pick (its VRAM) and the TRAIN_* settings. RunPod has no hard cap on host RAM; the minimums only filter hosts.
+
+### Commands
+
+```bash
+uv run python -m model.train.runpod_launch up                    # dry run: print the create_pod request
+uv run python -m model.train.runpod_launch run                   # dry run: request + the script run on the pod
+uv run python -m model.train.runpod_launch run --yes -- --epochs 1 --limit-train 2000   # smoke test
+uv run python -m model.train.runpod_launch run --yes             # full run, default 3 epochs
+
+# step by step (you must run `down` yourself)
+uv run python -m model.train.runpod_launch up --yes
+uv run python -m model.train.runpod_launch push
+uv run python -m model.train.runpod_launch train -- --epochs 3   # detached; args after -- go to train.py
+uv run python -m model.train.runpod_launch status                # pod status, rate, run finished or not
+uv run python -m model.train.runpod_launch logs -n 50
+uv run python -m model.train.runpod_launch pull                  # -> model/train/checkpoints/<run>/
+uv run python -m model.train.runpod_launch down
+```
+
+`run` = `up` → `push` → `train` → poll every minute → `pull` → `down`. The pod is terminated in a `finally`, so an error or Ctrl+C also ends billing. The checkpoints are pulled first when training started. The pod's console output is saved as `<run>/pod_run.out`. The pod id, host and port are kept in `gitignore/temp/runpod_pod.json`, with the pod's SSH host key in `gitignore/temp/runpod_known_hosts`. A second `up` is refused while a pod is recorded.
+
+Exit codes in the pod's `run.exit`: 0 success, 124 `RUNPOD_MAX_HOURS` reached, 3 no usable CUDA on the pod (the driver does not match the locked torch), 130 interrupted; others come from `uv sync` or train.py.
+
+### Costs and limits
+
+- Nothing is created without `--yes`. The hourly rate (`cost` from the API) is printed when the pod is created.
+- **Step-by-step use bills until `down`.** When `RUNPOD_MAX_HOURS` stops training, the pod itself keeps running until `down`.
+- **`run` needs this machine awake and online.** Polling tolerates up to 10 failed SSH checks in a row (about 10 minutes); after that `run` gives up and tries to terminate the pod (the run is lost). If this machine sleeps, nothing runs, and the pod bills until it wakes. If the network is down, the terminate call can fail too: then run `down` yourself.
+- `status` shows whether a pod is still recorded. In doubt, check the RunPod console.
+
 ## Tested and not tested
 
-The full path (build, train, validate, save, reload, test, export metrics and plots) runs offline on a tiny random BERT with synthetic data, and the loop learns a toy task in the unit tests. The plots were rendered from synthetic numbers and checked by eye; they have not been seen with real results. The end-to-end test runs `main()` on a tiny local checkpoint (success, a failing run, an interrupted run, missing matplotlib). It has **not** been run on mmBERT, on real data, or on a GPU/MPS device.
+The full path (build, train, validate, save, reload, test, export metrics and plots) runs offline on a tiny random BERT with synthetic data, and the loop learns a toy task in the unit tests. The plots were rendered from synthetic numbers and checked by eye; they have not been seen with real results. The end-to-end test runs `main()` on a tiny local checkpoint (success, a failing run, an interrupted run, missing matplotlib). It has **not** been run on mmBERT, on real data, or on a GPU/MPS device. `--gradient-checkpointing` is tested end to end on the tiny model.
+
+The RunPod launcher is tested offline with a fake SDK and a fake ssh/scp runner: request contents, the SSH endpoint lookup, quoting in the pod script, the hourly-rate guard, and termination when a step fails. The pod script passes `bash -n`. It has **not** been run against RunPod: the first real run (the smoke test above) checks the SSH port mapping, the CUDA filter values, the `uv sync` on the pod and the timing.

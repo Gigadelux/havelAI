@@ -1,6 +1,6 @@
 # Changelog
 
-_Last updated: 2026-11-21_
+_Last updated: 2026-11-25_
 
 All notable changes to this project are recorded here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [Semantic Versioning](https://semver.org/).
@@ -18,6 +18,10 @@ Add one line per meaningful change under `[Unreleased]`. Security-relevant chang
 - 2026-11-21: `model/train/train.py`: mmBERT fine-tuning (weighted loss, validation-based checkpointing, test evaluation, `--dry-run`) and `model/tests/test_train.py`.
 - 2026-11-21: `requirements.txt`: pinned `model` extra for pip users (resolved with pip; regenerate with `uv export` once `uv.lock` exists).
 - 2026-11-21: offline unit tests in `src/tests/` and `model/tests/`.
+- 2026-11-25: `model/train/runpod_launch.py`: trains on a RunPod GPU pod over SSH, with no network volume (`up`, `push`, `train`, `status`, `logs`, `pull`, `down`, and `run` for all of it, which always terminates the pod). Pod size (RUNPOD_*) and training memory (TRAIN_*) are set in `.env`; `example.env` documents them. Dry run unless `--yes`; hourly-rate limit; training time limit. Tests in `model/tests/test_runpod_launch.py` (offline, fake SDK and ssh).
+- 2026-11-25: the launcher creates its own SSH key (`gitignore/temp/runpod_ed25519`) on the first `--yes` when `RUNPOD_SSH_KEY` is empty, so `RUNPOD_API_KEY` is the only value to fill in. A key set in `RUNPOD_SSH_KEY` is never generated.
+- 2026-11-25: `train.py --gradient-checkpointing` to trade compute for activation memory.
+- 2026-11-25: `runpod>=2.4.0` (MIT) added in a new `cloud` dependency group. Resolving it with the rest moved `python-dateutil` from 4.0.0 to 2.9.0.post0 in `uv.lock` and `requirements.txt` (runpod's boto3/botocore needs `<3`).
 
 ### Changed
 - 2026-11-21: `train.py` now shows tqdm progress bars (per epoch, validation and test; `--no-progress` to turn off) and logs through the `havelai.train` logger to stderr and `<run>/train.log`: start configuration, data warnings, per-epoch progress, and errors with tracebacks. A NaN or infinite training loss now stops the run with a clear error; an interrupted run exits 130 and still exports its partial metrics. `tqdm` is now an explicit `model` dependency.

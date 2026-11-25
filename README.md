@@ -1,6 +1,6 @@
 # havelAI
 
-_Last updated: 2026-11-21_
+_Last updated: 2026-11-25_
 
 A small Python library for detecting and classifying **prompt-injection attacks**, plus the workspace used to train a local classifier based on [mmBERT](https://huggingface.co/jhu-clsp/mmBERT-base).
 
@@ -39,7 +39,10 @@ Without uv: `pip install -r requirements.txt` (pinned versions of the `model` ex
 ```bash
 uv run python -m model.train.enhance_pipeline --split train --limit 200 --dry-run   # print a request, call nothing
 uv run python -m model.train.train --dry-run                                         # data report, no torch
+uv run python -m model.train.runpod_launch run                                       # RunPod training, dry run (needs --group cloud)
 ```
+
+Training runs on a rented RunPod GPU (it ran out of memory locally on MPS). Pod size and training memory are set in `.env`; see [`docs/TRAINING.md`](docs/TRAINING.md#training-on-runpod).
 
 Positive dataset rows are sent to OpenRouter and TypeSafe for labeling: do not use private text. Check the measured cost of a 200-row trial before a full run. See [`docs/ENHANCEMENT_PIPELINE.md`](docs/ENHANCEMENT_PIPELINE.md) and [`docs/TRAINING.md`](docs/TRAINING.md).
 
@@ -65,6 +68,7 @@ New dependencies must be license-compatible with Apache 2.0. The library itself 
 |---|---|---|
 | httpx (`model` extra) | Calls to OpenRouter | BSD-3-Clause |
 | matplotlib (`model` extra) | Metric plots | Matplotlib license (permissive, PSF-based) |
+| runpod (`cloud` dependency group, not shipped) | Creates and terminates the RunPod training pod (`model/train/runpod_launch.py`). Brings its own server stack (aiohttp, fastapi, boto3, sentry-sdk...), which is why it is kept out of the `model` extra and off the pod | MIT |
 | tqdm (`model` extra) | Training progress bars | MPL-2.0 and MIT (used unmodified as a dependency; MPL-2.0 is file-level copyleft, so do not vendor and edit its files) |
 | datasets, transformers, torch, accelerate, scikit-learn (`model` extra) | Data loading and training | Apache-2.0 (datasets, transformers, accelerate), BSD (torch, scikit-learn) |
 | mmBERT (`jhu-clsp/mmBERT-small`) | Base model | MIT |

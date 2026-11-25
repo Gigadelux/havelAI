@@ -29,6 +29,9 @@ model = [
 ]
 
 [dependency-groups]
+cloud = [
+    "runpod>=2.4.0",
+]
 dev = [
     "pytest",
     "ruff",
