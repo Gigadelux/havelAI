@@ -122,6 +122,12 @@ def _style(ax, title: str, xlabel: str, ylabel: str) -> None:
     ax.set_axisbelow(True)
 
 
+def _integer_ticks(axis) -> None:
+    from matplotlib.ticker import MaxNLocator
+
+    axis.set_major_locator(MaxNLocator(integer=True))
+
+
 def _hist(plt, values, path: Path, title: str, xlabel: str, line: float | None = None) -> Path:
     fig, ax = plt.subplots(figsize=(7, 3.6), facecolor=SURFACE)
     ax.hist(
@@ -137,6 +143,7 @@ def _hist(plt, values, path: Path, title: str, xlabel: str, line: float | None =
             line, ax.get_ylim()[1] * 0.95, f"  threshold {line:g}", color=INK2, va="top", fontsize=9
         )
     _style(ax, title, xlabel, "detections")
+    _integer_ticks(ax.yaxis)
     fig.tight_layout()
     fig.savefig(path, dpi=150)
     plt.close(fig)
@@ -155,6 +162,8 @@ def _hbar(plt, labels, values, path: Path, title: str, xlabel: str, fmt: str) ->
     ax.grid(axis="y", visible=False)
     ax.grid(axis="x", color=GRID, linewidth=0.8)
     ax.set_xlim(0, max(values) * 1.18 if values and max(values) > 0 else 1)
+    if fmt == "d":
+        _integer_ticks(ax.xaxis)
     fig.tight_layout()
     fig.savefig(path, dpi=150)
     plt.close(fig)

@@ -60,6 +60,8 @@ class MilvusLiteRepository(VectorRepository):
                 )
             else:
                 self._check_dimension()
+            # an existing collection opens "released"; search needs it loaded
+            self._client.load_collection(self.collection)
         except RepositoryError:
             raise
         except Exception as exc:
