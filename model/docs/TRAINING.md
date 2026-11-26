@@ -205,6 +205,28 @@ Exit codes in the pod's `run.exit`: 0 success, 124 `RUNPOD_MAX_HOURS` reached, 3
 - **`run` needs this machine awake and online.** Polling tolerates up to 10 failed SSH checks in a row (about 10 minutes); after that `run` gives up and stops the pod. If this machine sleeps, nothing runs, and the pod bills until it wakes. If the network is down, the stop call can fail too: then run `stop` yourself.
 - `status` shows the recorded pod and its state. In doubt, check the RunPod console.
 
+## Export and publishing
+
+`model/export/hf_publish.py` turns a run's `best/` checkpoint into the files the library downloads, and publishes them as **`Gigadelux/havel_base`** on Hugging Face (private while the dataset license is unverified). Everything is written to `<run>/export/` (gitignored).
+
+```bash
+uv run python -m model.export.hf_publish export          # ONNX fp32 + dynamic int8
+uv run python -m model.export.hf_publish verify          # both ONNX files on the run's own test split (CPU)
+uv run python -m model.export.hf_publish card            # README.md (model card) + havel_meta.json
+uv run python -m model.export.hf_publish upload          # dry run: list files and sizes
+uv run python -m model.export.hf_publish upload --yes    # upload; the repo is created/kept private
+```
+
+- **Export:** `torch.onnx.export` (opset 18, eager attention, dynamic batch and sequence axes) with one output, `logits`. Then `onnxruntime.quantization.quantize_dynamic` with `QInt8` weights for MatMul **and Gather**. The 256k x 384 embedding table is most of the model, so quantizing Gather is what brings the size down.
+- **Verify:** rebuilds the test split with `train.py`'s own loading and split functions and the run's seed, tokenizes with `tokenizer.json` (truncation at 512), and scores the fp32 and int8 ONNX files with ONNX Runtime on CPU. The results go to `<run>/export/verify.json` and into the model card. Dataset text is only scored, never printed or written.
+- **Upload:** fp32 `model.safetensors` + `config.json` + tokenizer at the repo root (for `transformers`), `onnx/model.onnx` and `onnx/model_int8.onnx` (for `onnxruntime`), `README.md`, and `havel_meta.json` (labels, max length, file names) for the library.
+
+A sanity check on two hand-written sentences, plus one input over 512 tokens: the fp32 ONNX graph matched PyTorch to within 2.1e-5 (max absolute logit difference), and int8 predicted the same classes.
+
+### Measured: ONNX fp32 vs int8 (run `mmBERT-small-runpod-20261125T190715Z`)
+
+Not measured yet: `verify` on the full 18,404-row test split was still running when this section was written. The numbers are added here, and in the model card, when it finishes.
+
 ## Tested and not tested
 
 The full path (build, train, validate, save, reload, test, export metrics and plots) runs offline on a tiny random BERT with synthetic data, and the loop learns a toy task in the unit tests. The plots were rendered from synthetic numbers and checked by eye; they have not been seen with real results. The end-to-end test runs `main()` on a tiny local checkpoint (success, a failing run, an interrupted run, missing matplotlib). It has since been run once for real: mmBERT-small, the full enhanced data, on a RunPod RTX 4090 (CUDA), 3 epochs of about 12.5 minutes each (run `mmBERT-small-runpod-20261125T190715Z`, results in [`METRICS.md`](METRICS.md)). It has not been run on MPS. `--gradient-checkpointing` is tested end to end on the tiny model.
