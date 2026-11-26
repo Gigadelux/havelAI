@@ -1,15 +1,71 @@
 # Model architecture
 
-_Last updated: 2026-11-21_
+_Last updated: 2026-11-26_
 
-**Status: the model is implemented, nothing is trained.** `model/architecture.py` defines the two-head model (mmBERT-small, binary + attack-type heads), the loss and the decision rule. The 32k vocabulary, the training loop for two heads and the int8 export are not built yet (see [What is built and what is not](#what-is-built-and-what-is-not)). Nothing here has been trained or measured on real data. The decision is recorded in [`../DECISIONS.md`](../DECISIONS.md).
+This file describes the havelAI classifier: **what is trained and published today** (`havel_base`, a single-head mmBERT-small) and **the target design** (two heads, 32k vocabulary, int8), which is defined in `model/architecture.py` but not trained yet. Measured results are in [`METRICS.md`](METRICS.md), training in [`TRAINING.md`](TRAINING.md), the data in [`ENHANCEMENT_PIPELINE.md`](ENHANCEMENT_PIPELINE.md), the classes in [`../../docs/TAXONOMY.md`](../../docs/TAXONOMY.md). The design decision is recorded in [`../../DECISIONS.md`](../../DECISIONS.md).
+
+> 🧪 **Coming next: a data-augmentation training batch.** The current training rows are short, mostly standalone prompts, while the library scores long inputs **chunk by chunk** (see [Inference in the library](#inference-in-the-library-chunking)). A data-augmentation pipeline will build a new training batch where prompt injections are **inserted into benign text in different ways**: at the start, middle or end, wrapped in documents, emails, code or markdown, split across sentences, and mixed with benign instructions. The goal is a model that finds an injection inside a chunk instead of only recognizing a whole-prompt attack. It is not built yet. Until it is, expect weaker results on injections hidden inside long text than [`METRICS.md`](METRICS.md) shows.
+
+## Trained model: `havel_base` (v0.1, single head)
+
+Run `mmBERT-small-runpod-20261125T190715Z`. Trained with `model/train/train.py` (`build_classifier`, the single-head baseline). Published as `Gigadelux/havel_base` on Hugging Face. Values below are from the checkpoint's `config.json` and `run.json`.
+
+```mermaid
+flowchart TB
+    TXT["text (one chunk)"] --> TOK["mmBERT tokenizer<br/>Gemma 2 BPE, 256k tokens"]
+    TOK --> EMB["Embedding table<br/>256,000 x 384 (tied)"]
+    EMB --> ENC["ModernBERT encoder<br/>22 layers, hidden 384, 6 heads<br/>MLP 1152, GELU"]
+    ENC --> POOL["Mean pooling<br/>over tokens"]
+    POOL --> HEAD["Classifier head<br/>dense 384x384 + GELU + LayerNorm<br/>Linear 384 to 10"]
+    HEAD --> SM["softmax over 10 classes"]
+    SM --> PINJ["p_inj = 1 - P(benign)"]
+    SM --> TYPE["attack_type = argmax over<br/>the 9 attack classes"]
+```
+
+| Setting | Value |
+|---|---|
+| Architecture | `ModernBertForSequenceClassification` (transformers 5.24.0) |
+| Base model | `jhu-clsp/mmBERT-small` (MIT) |
+| Layers / hidden / heads / MLP | 22 / 384 / 6 / 1152 |
+| Attention | global every 3rd layer (8 of 22), sliding window of 128 tokens in the rest; RoPE theta 160,000 |
+| Context | 8,192 positions supported; **trained with max length 512** |
+| Pooling | mean |
+| Vocabulary | 256,000 (not pruned) |
+| Outputs | 10 logits, one per class in `src/data/taxonomy.py` (`id2label` is stored in the config) |
+| Parameters | about 140.6 M (98.3 M of them in the embedding table) |
+| Weights file | `model.safetensors`, 562,595,720 bytes (fp32) |
+| Quantizations on the Hub | fp32 safetensors (transformers), ONNX fp32 and ONNX int8 (onnxruntime), see [`TRAINING.md`](TRAINING.md#export-and-publishing) |
+
+How the 10 outputs are read:
+
+- **Is it an injection?** `p_inj = 1 - softmax(logits)[benign]`. This is the score the library's model layer reports per chunk.
+- **Which attack?** the attack class with the highest probability, ignoring `benign`.
+- Benign rows train against the dataset's own label. Attack rows train against Jev's attack type (rows below confidence 0.6 dropped). So the type is "what Jev would say", not ground truth (see [`METRICS.md`](METRICS.md)).
+
+Size: at 562 MB fp32, the published model is **over the 256 MB target** in the requirements below. It is mostly the 256k embedding table. The int8 ONNX export brings it down (measured size in [`TRAINING.md`](TRAINING.md#export-and-publishing)). The 32k vocabulary pruning below is still the planned fix.
+
+### Inference in the library (chunking)
+
+The library's model layer (`src/services/local/model_catch.py`) does not send the whole prompt to the model at once:
+
+1. The prompt is split into sentences.
+2. The sentences are packed into chunks. **The chunk size grows with the input size**: `chunk_tokens = clamp(64, 512, 32 x ceil(sqrt(total_tokens)))`. A short prompt is one chunk; a long document gets larger and fewer chunks, never more than the 512 tokens the model was trained on.
+3. Each chunk is scored separately. The prompt's model score is the **highest** chunk `p_inj`, and the attack type comes from that chunk.
+
+This catches an injection hidden in one sentence of a long benign text, which would be diluted if the whole text were one input. The model has not yet been trained on that kind of input; that is what the data-augmentation batch above is for.
+
+---
+
+## Target design (planned): two heads, 32k vocabulary, int8
+
+**Status: implemented in `model/architecture.py`, not trained.** The sections below describe the target. `train.py` still trains the single-head baseline above.
 
 ## Requirements
 
 - Runs on a laptop CPU on every dev machine.
 - The model (weights) is at most **256 MB**.
 - No second model is trained for memory reasons: the only training run is the fine-tuning itself. No distillation into a smaller student, no quantization-aware training, no pruning followed by a separate retraining. Compression is done once before fine-tuning (vocabulary) and once after (int8 export).
-- Output: is it an injection, and which attack type ([`TAXONOMY.md`](TAXONOMY.md)).
+- Output: is it an injection, and which attack type ([`TAXONOMY.md`](../../docs/TAXONOMY.md)).
 
 ## Overview
 
@@ -32,7 +88,7 @@ flowchart TB
     COMB --> OUT["Detection<br/>attack_type + score"]
 ```
 
-The nine attack types are every class in [`src/data/taxonomy.py`](../src/data/taxonomy.py) except `benign`: `instruction_override`, `jailbreak_persona`, `prompt_leaking`, `sensitive_data_exfiltration`, `coercion_social_engineering`, `context_manipulation`, `obfuscation_encoding`, `harmful_task_request`, `other_injection`.
+The nine attack types are every class in [`src/data/taxonomy.py`](../../src/data/taxonomy.py) except `benign`: `instruction_override`, `jailbreak_persona`, `prompt_leaking`, `sensitive_data_exfiltration`, `coercion_social_engineering`, `context_manipulation`, `obfuscation_encoding`, `harmful_task_request`, `other_injection`.
 
 ## How the two heads interact
 
@@ -134,7 +190,7 @@ PyTorch is not the inference runtime: importing `torch` and `transformers` alone
 - **Type:** accuracy and macro-F1 of the type head on rows that are truly attacks, against Jev's labels. These measure agreement with the labeler, not true accuracy.
 - **End to end:** the combined 10-class confusion matrix.
 - **Generalization:** the dataset looks short, templated and English-only, so its own test split will overestimate real performance. Evaluate on a second public prompt-injection dataset, and on a few hand-written attacks in the target languages.
-- **Long inputs:** attacks hidden in long documents are not in the training data. The detector should split long text into windows and take the maximum `p_inj`. That belongs in `src/detection/`, not in the model.
+- **Long inputs:** attacks hidden in long documents are not in the training data. The library splits long text into chunks and takes the maximum `p_inj` (see [Inference in the library](#inference-in-the-library-chunking)); the data-augmentation batch will add such inputs to training.
 - **Compare against the baseline:** a flat 10-way head with the same encoder, on the same data, judged on the binary metric.
 
 ## What is built and what is not
@@ -160,8 +216,8 @@ The module imports without torch; the model class is created on first use.
 - **Vocabulary pruning:** token selection from the corpus, the pruned tokenizer, slicing the embedding matrix, and the tokenization check. The config's special-token ids (`pad_token_id`, `bos`, `eos`, `cls`, `sep`) must be remapped to the new ids, or the model will not build.
 - **Two-head training in `train.py`:** it still trains the single-head baseline on hard labels. It needs the original label and `attack_type_probs` per row, the combined loss, class weights on the type loss, and the metrics above.
 - **Calibration** (temperature per head) and threshold tuning.
-- **ONNX export and int8 quantization**, with the accuracy comparison.
-- **Inference code in `src/detection/`** (ONNX Runtime, windowing for long text) behind an optional extra.
+- **ONNX export and int8 quantization for the two-head model.** The single-head model is exported by `model/export/hf_publish.py`.
+- Inference for the two-head model. The single-head model is served by `src/services/local/model_catch.py` (ONNX Runtime, chunking), behind the `local` extra.
 
 ## Process memory (measured, for reference)
 

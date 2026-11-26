@@ -1,8 +1,10 @@
 # Enhancement pipeline
 
-_Last updated: 2026-11-21_
+_Last updated: 2026-11-26_
 
-`model/train/enhance_pipeline.py` adds an **attack type** to the binary dataset [`jayavibhav/prompt-injection`](https://huggingface.co/datasets/jayavibhav/prompt-injection) (`text`, `label` 0/1; train 261,738 and test 65,416 rows; no license shown on the card). The classes are defined in [`src/data/taxonomy.py`](../src/data/taxonomy.py) and explained in [`TAXONOMY.md`](TAXONOMY.md).
+`model/train/enhance_pipeline.py` adds an **attack type** to the binary dataset [`jayavibhav/prompt-injection`](https://huggingface.co/datasets/jayavibhav/prompt-injection) (`text`, `label` 0/1; train 261,738 and test 65,416 rows; no license shown on the card). The classes are defined in [`src/data/taxonomy.py`](../../src/data/taxonomy.py) and explained in [`TAXONOMY.md`](../../docs/TAXONOMY.md).
+
+> 🧪 **Planned: a data-augmentation pipeline.** This pipeline only relabels the existing rows. A second pipeline will build a new training batch by **inserting prompt injections into benign text in different ways**: position, wrapping in documents, emails, code or tool output, splitting across sentences, and mixing with benign instructions. The aim is to match how the library scores input chunk by chunk ([`ARCHITECTURE.md`](ARCHITECTURE.md#inference-in-the-library-chunking)). It is not built yet.
 
 ```mermaid
 flowchart LR

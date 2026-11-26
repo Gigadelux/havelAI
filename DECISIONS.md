@@ -1,6 +1,6 @@
 # Decisions
 
-_Last updated: 2026-11-21_
+_Last updated: 2026-11-26_
 
 A log of design choices, written as **"X over Y because Z"**. Add an entry whenever a design choice is made, so the reasoning survives after the code changes. Newest entries go on top.
 
@@ -32,7 +32,7 @@ A log of design choices, written as **"X over Y because Z"**. Add an entry whene
 - **Decision:** the model is mmBERT-small with the vocabulary pruned to 32k tokens before the single fine-tuning run, exported to int8 afterwards, with one shared encoder and two heads: a binary head (trained on all rows with the dataset's original label) and a nine-way attack-type head (trained on attack rows with Jev's probabilities as soft targets). At inference the binary head decides whether it is an attack and the type head only picks the type.
 - **Over:** mmBERT-base; the full 256k vocabulary; a single 10-way softmax (kept as the comparison baseline); distillation, quantization-aware training or a second retrained model to meet the memory limit.
 - **Because:** the model file must be at most 256 MB and run on laptop CPUs. Computed size is about 55 MB in int8 (base would not fit). Two heads keep the only ground truth (binary) separate from Jev's noisier type labels, and the second head costs 3,465 parameters. Pruning before fine-tuning stays within the "no second model" rule.
-- **Consequences:** English-heavy token selection weakens other languages (open question). Needs a pruning tool, a two-head model class, a new loss and an ONNX int8 export, none built yet. Compare against the single-head baseline on the binary metric and revisit if the two-head model does not win. Sizes are computed, not measured; quantization accuracy loss is untested. Details in `docs/MODEL_ARCHITECTURE.md`.
+- **Consequences:** English-heavy token selection weakens other languages (open question). Needs a pruning tool, a two-head model class, a new loss and an ONNX int8 export, none built yet. Compare against the single-head baseline on the binary metric and revisit if the two-head model does not win. Sizes are computed, not measured; quantization accuracy loss is untested. Details in `model/docs/ARCHITECTURE.md`.
 
 ### 2026-11-21 — Plain PyTorch loop, keep `other_injection`, report binary metrics first
 - **Decision:** a hand-written training loop; drop only `unlabeled` and low-confidence rows (keep `other_injection`); weight the loss by the square root of balanced class weights; headline metric is injection vs benign against the original dataset label.

@@ -1,6 +1,6 @@
 """mmBERT models for prompt-injection detection.
 
-Two models live here. See docs/MODEL_ARCHITECTURE.md for the design and the reasoning.
+Two models live here. See model/docs/ARCHITECTURE.md for the design and the reasoning.
 
 1. `build_classifier`: the single-head baseline. `AutoModelForSequenceClassification` with one
    output per class in `src.data.taxonomy.LABELS`. Kept so the two-head model can be compared

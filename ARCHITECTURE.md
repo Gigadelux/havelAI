@@ -1,8 +1,8 @@
 # Architecture
 
-_Last updated: 2026-11-21_
+_Last updated: 2026-11-26_
 
-This file describes the **Python library** (`src/`, installed as `havelai`). The model workspace (`model/`) has its own documents in `docs/`; a short overview is at the end.
+This file describes the **Python library** (`src/`, installed as `havelai`). The model workspace (`model/`) has its own documents in `model/docs/`; a short overview is at the end.
 
 The library is stdlib-only at runtime. It defines what a detection is, which attack classes exist, and how results are aggregated. Detectors plug in behind a small protocol.
 
@@ -56,8 +56,10 @@ The folder is `src/`; the installed package is `havelai`. Hatch maps one to the 
 
 `model/` is not shipped. It turns the public dataset into a trained classifier that a future detector will load:
 
-1. [`enhance_pipeline.py`](docs/ENHANCEMENT_PIPELINE.md) adds an attack type to the binary labels of `jayavibhav/prompt-injection`, using the Jev decision model on OpenRouter.
-2. [`train.py`](docs/TRAINING.md) fine-tunes an mmBERT classifier on the result; `metrics.py` computes, tracks and plots its metrics.
-3. [`architecture.py`](docs/MODEL_ARCHITECTURE.md) defines the model: mmBERT-small with a binary and an attack-type head (defined and tested; training it, vocabulary pruning and the int8 export are not built yet).
+1. [`enhance_pipeline.py`](model/docs/ENHANCEMENT_PIPELINE.md) adds an attack type to the binary labels of `jayavibhav/prompt-injection`, using the Jev decision model on OpenRouter.
+2. [`train.py`](model/docs/TRAINING.md) fine-tunes an mmBERT classifier on the result; `metrics.py` computes, tracks and plots its metrics.
+3. [`architecture.py`](model/docs/ARCHITECTURE.md) defines the model. Trained and published today: **`havel_base`**, a single-head mmBERT-small (results in [`model/docs/METRICS.md`](model/docs/METRICS.md)). Planned: two heads, 32k vocabulary, int8.
 
-`model/` imports `src.data.taxonomy`, so the library and the model always agree on the class list. Details live in `docs/`: [`TAXONOMY.md`](docs/TAXONOMY.md), [`ENHANCEMENT_PIPELINE.md`](docs/ENHANCEMENT_PIPELINE.md), [`TRAINING.md`](docs/TRAINING.md), [`MODEL_ARCHITECTURE.md`](docs/MODEL_ARCHITECTURE.md).
+> 🧪 **Next: a data-augmentation training batch**, in which prompt injections are inserted into benign text in different ways so the model learns to find them inside the chunks the library scores. See [`model/docs/ARCHITECTURE.md`](model/docs/ARCHITECTURE.md).
+
+`model/` imports `src.data.taxonomy`, so the library and the model always agree on the class list. Details: [`docs/TAXONOMY.md`](docs/TAXONOMY.md), and in `model/docs/`: [`ARCHITECTURE.md`](model/docs/ARCHITECTURE.md), [`METRICS.md`](model/docs/METRICS.md), [`TRAINING.md`](model/docs/TRAINING.md), [`ENHANCEMENT_PIPELINE.md`](model/docs/ENHANCEMENT_PIPELINE.md).

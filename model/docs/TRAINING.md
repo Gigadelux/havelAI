@@ -1,8 +1,10 @@
 # Training
 
-_Last updated: 2026-11-25_
+_Last updated: 2026-11-26_
 
-`model/train/train.py` fine-tunes mmBERT on the enhanced data and evaluates the best epoch on the test split. All metric computation, tracking and plotting live in `model/train/metrics.py`; `train.py` only calls it. The model itself is described in [`MODEL_ARCHITECTURE.md`](MODEL_ARCHITECTURE.md); the data comes from [`ENHANCEMENT_PIPELINE.md`](ENHANCEMENT_PIPELINE.md).
+`model/train/train.py` fine-tunes mmBERT on the enhanced data and evaluates the best epoch on the test split. All metric computation, tracking and plotting live in `model/train/metrics.py`; `train.py` only calls it. The model itself is described in [`ARCHITECTURE.md`](ARCHITECTURE.md); the data comes from [`ENHANCEMENT_PIPELINE.md`](ENHANCEMENT_PIPELINE.md). Results of the first full run are in [`METRICS.md`](METRICS.md).
+
+> 🧪 **Next training batch: data augmentation.** A data-augmentation pipeline will create a new batch in which prompt injections are **inserted into benign text in different ways** (start, middle or end of a document; wrapped in emails, code, markdown or tool output; split across sentences; mixed with benign instructions). The library scores input chunk by chunk ([`ARCHITECTURE.md`](ARCHITECTURE.md#inference-in-the-library-chunking)), so the model needs to learn to spot an injection inside a chunk, not only a standalone attack prompt. Not built yet; the current run trains on the dataset rows as they are.
 
 ```mermaid
 flowchart LR
@@ -205,6 +207,6 @@ Exit codes in the pod's `run.exit`: 0 success, 124 `RUNPOD_MAX_HOURS` reached, 3
 
 ## Tested and not tested
 
-The full path (build, train, validate, save, reload, test, export metrics and plots) runs offline on a tiny random BERT with synthetic data, and the loop learns a toy task in the unit tests. The plots were rendered from synthetic numbers and checked by eye; they have not been seen with real results. The end-to-end test runs `main()` on a tiny local checkpoint (success, a failing run, an interrupted run, missing matplotlib). It has **not** been run on mmBERT, on real data, or on a GPU/MPS device. `--gradient-checkpointing` is tested end to end on the tiny model.
+The full path (build, train, validate, save, reload, test, export metrics and plots) runs offline on a tiny random BERT with synthetic data, and the loop learns a toy task in the unit tests. The plots were rendered from synthetic numbers and checked by eye; they have not been seen with real results. The end-to-end test runs `main()` on a tiny local checkpoint (success, a failing run, an interrupted run, missing matplotlib). It has since been run once for real: mmBERT-small, the full enhanced data, on a RunPod RTX 4090 (CUDA), 3 epochs of about 12.5 minutes each (run `mmBERT-small-runpod-20261125T190715Z`, results in [`METRICS.md`](METRICS.md)). It has not been run on MPS. `--gradient-checkpointing` is tested end to end on the tiny model.
 
-The RunPod launcher is tested offline with a fake SDK and a fake ssh/scp runner: request contents, the SSH endpoint lookup, quoting in the pod script, the hourly-rate guard, and termination when a step fails. The pod script passes `bash -n`. It has **not** been run against RunPod: the first real run (the smoke test above) checks the SSH port mapping, the CUDA filter values, the `uv sync` on the pod and the timing.
+The RunPod launcher is tested offline with a fake SDK and a fake ssh/scp runner: request contents, the SSH endpoint lookup, quoting in the pod script, the hourly-rate guard, and termination when a step fails. The pod script passes `bash -n`. It has been run against RunPod for the 2026-11-25 training run.

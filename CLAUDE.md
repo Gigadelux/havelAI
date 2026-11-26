@@ -1,6 +1,6 @@
 # CLAUDE.md — havelAI
 
-_Last updated: 2026-11-25_
+_Last updated: 2026-11-26_
 
 ## What this project is
 **havelAI** is a small Python library for detecting and classifying **prompt-injection attacks**. It has two parts:
@@ -29,8 +29,9 @@ havelAI/
 │   │   ├── train.py             # fine-tunes mmBERT on the enhanced data; writes checkpoints/
 │   │   └── metrics.py           # TrainingMetrics: metric math, tracking, plot export
 │   ├── architecture.py          # mmBERT sequence classifier
+│   ├── docs/                    # model docs: ARCHITECTURE, METRICS, TRAINING, ENHANCEMENT_PIPELINE (+ img/)
 │   └── tests/                   # unit tests for the pipeline
-├── docs/                        # model docs: TAXONOMY, ENHANCEMENT_PIPELINE, TRAINING, MODEL_ARCHITECTURE
+├── docs/                        # TAXONOMY.md (shared by library and model)
 ├── gitignore/                   # IGNORED BY GIT — never commit anything here
 │   ├── data/  docs/  temp/
 ├── .gitignore  .python-version  example.env  pyproject.toml  requirements.txt  uv.lock  LICENSE
@@ -49,7 +50,7 @@ havelAI/
 | Raw and enhanced data | `model/train/data/` (gitignored contents) |
 | Library unit tests / pipeline unit tests | `src/tests/` / `model/tests/` |
 | Taxonomy rationale and literature | `docs/TAXONOMY.md` |
-| Model docs (pipeline, training, model design) | `docs/` (not the root `ARCHITECTURE.md`, which covers the library only) |
+| Model docs (pipeline, training, model design, measured metrics) | `model/docs/` (not the root `ARCHITECTURE.md`, which covers the library only) |
 | Private notes, caches | `gitignore/` |
 
 ### Import names
@@ -63,12 +64,12 @@ Defined in `src/data/taxonomy.py`, explained with literature in `docs/TAXONOMY.m
 - `benign` is assigned in code to label-0 rows and is never sent to the labeler.
 
 ## Model workspace (overview)
-Details live in `docs/`; keep them there, not here. The root `ARCHITECTURE.md` describes the library only.
+Details live in `model/docs/`; keep them there, not here. Measured results of each published run go in `model/docs/METRICS.md`. The root `ARCHITECTURE.md` describes the library only.
 
-- **Data enhancement** (`model/train/enhance_pipeline.py`, see `docs/ENHANCEMENT_PIPELINE.md`): relabels `jayavibhav/prompt-injection` (binary) with an attack type using Jev (`typesafe/jev-1.14`) on OpenRouter. Only label-1 rows are sent; output is resumable JSONL in `model/train/data/enhanced/`. Pin the model version, never `~typesafe/jev-latest`.
-- **Training** (`model/train/train.py`, see `docs/TRAINING.md`): fine-tunes mmBERT with tqdm progress bars and logging (stderr + `train.log`, never dataset text), on the enhanced data, and writes `model/train/checkpoints/<run>/` (gitignored), including a `metrics/` folder with JSON tables and PNG plots from `model/train/metrics.py`. Headline metric is injection vs benign against the dataset's original `label`; attack-type metrics only measure agreement with Jev.
-- **Training on RunPod** (`model/train/runpod_launch.py`, see `docs/TRAINING.md`): training runs on a RunPod GPU pod over SSH (it ran out of memory locally on MPS). Pod size (RUNPOD_*) and training memory (TRAIN_*) come from `.env`. Creating a pod costs money: dry run first, `--yes` only with the owner's go-ahead. `runpod` lives in the `cloud` dependency group, not in the `model` extra.
-- **Model design** (`model/architecture.py`, see `docs/MODEL_ARCHITECTURE.md`): target is mmBERT-small, 32k vocabulary, int8, binary + attack-type heads, model file at most 256 MB, no second model trained for memory. `model/architecture.py` defines the two-head model; `train.py` still trains the single-head baseline, and vocabulary pruning and the int8 export are not built (see that doc).
+- **Data enhancement** (`model/train/enhance_pipeline.py`, see `model/docs/ENHANCEMENT_PIPELINE.md`): relabels `jayavibhav/prompt-injection` (binary) with an attack type using Jev (`typesafe/jev-1.14`) on OpenRouter. Only label-1 rows are sent; output is resumable JSONL in `model/train/data/enhanced/`. Pin the model version, never `~typesafe/jev-latest`.
+- **Training** (`model/train/train.py`, see `model/docs/TRAINING.md`): fine-tunes mmBERT with tqdm progress bars and logging (stderr + `train.log`, never dataset text), on the enhanced data, and writes `model/train/checkpoints/<run>/` (gitignored), including a `metrics/` folder with JSON tables and PNG plots from `model/train/metrics.py`. Headline metric is injection vs benign against the dataset's original `label`; attack-type metrics only measure agreement with Jev.
+- **Training on RunPod** (`model/train/runpod_launch.py`, see `model/docs/TRAINING.md`): training runs on a RunPod GPU pod over SSH (it ran out of memory locally on MPS). Pod size (RUNPOD_*) and training memory (TRAIN_*) come from `.env`. Creating a pod costs money: dry run first, `--yes` only with the owner's go-ahead. `runpod` lives in the `cloud` dependency group, not in the `model` extra.
+- **Model design** (`model/architecture.py`, see `model/docs/ARCHITECTURE.md`): target is mmBERT-small, 32k vocabulary, int8, binary + attack-type heads, model file at most 256 MB, no second model trained for memory. `model/architecture.py` defines the two-head model; `train.py` still trains the single-head baseline, and vocabulary pruning and the int8 export are not built (see that doc).
 
 ```bash
 uv run python -m model.train.enhance_pipeline --split train --limit 200 --dry-run   # print a request, call nothing
@@ -87,7 +88,7 @@ uv run python -m model.train.train --dry-run                                    
 
 ## Working conventions
 - **Before any non-trivial change, propose 2 options with trade-offs and wait for a choice.**
-- Documentation split: the root `ARCHITECTURE.md` covers the Python library; anything about the model (data, training, architecture) goes in its own file under `docs/`, and root files only quote an overview with a link.
+- Documentation split: the root `ARCHITECTURE.md` covers the Python library; anything about the model (data, training, architecture) goes in its own file under `model/docs/`, and root files only quote an overview with a link.
 - Small steps: one feature, show the diff, run tests, commit.
 - Every Markdown doc has a `Last updated: YYYY-MM-DD` line under its title: update it when you edit the file.
 - After each meaningful change: add a line to `CHANGELOG.md`; suggest a `DECISIONS.md` entry when a design choice was made.

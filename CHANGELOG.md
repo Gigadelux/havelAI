@@ -1,6 +1,6 @@
 # Changelog
 
-_Last updated: 2026-11-25_
+_Last updated: 2026-11-26_
 
 All notable changes to this project are recorded here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [Semantic Versioning](https://semver.org/).
@@ -25,6 +25,7 @@ Add one line per meaningful change under `[Unreleased]`. Security-relevant chang
 - 2026-11-25: `runpod>=2.4.0` (MIT) added in a new `cloud` dependency group. Resolving it with the rest moved `python-dateutil` from 4.0.0 to 2.9.0.post0 in `uv.lock` and `requirements.txt` (runpod's boto3/botocore needs `<3`).
 
 ### Changed
+- 2026-11-26: model docs moved from `docs/` to `model/docs/` (`TRAINING.md`, `ENHANCEMENT_PIPELINE.md`; `MODEL_ARCHITECTURE.md` merged into the new `model/docs/ARCHITECTURE.md`, which now separates the trained single-head model from the planned two-head design). New `model/docs/METRICS.md` with the measured results of run `mmBERT-small-runpod-20261125T190715Z` and its plots in `model/docs/img/run-20261125/`. `docs/` keeps `TAXONOMY.md`. Links in `CLAUDE.md`, `README.md`, `ARCHITECTURE.md`, `DECISIONS.md` updated.
 - 2026-11-21: `train.py` now shows tqdm progress bars (per epoch, validation and test; `--no-progress` to turn off) and logs through the `havelai.train` logger to stderr and `<run>/train.log`: start configuration, data warnings, per-epoch progress, and errors with tracebacks. A NaN or infinite training loss now stops the run with a clear error; an interrupted run exits 130 and still exports its partial metrics. `tqdm` is now an explicit `model` dependency.
 - 2026-11-21: metrics split out of `train.py` into `model/train/metrics.py`: one class, `TrainingMetrics`, that computes the metrics, records training, and exports JSON tables plus six matplotlib plots into `<run>/metrics/` with `flush()`. New: a validation pass before training and the improvement metrics (change in validation accuracy / macro-F1 / loss per epoch, and the slope of training accuracy over batches). `matplotlib` added to the `model` extra; `uv.lock` and `requirements.txt` regenerated.
 - 2026-11-21: one encoder constant, `ENCODER_MODEL` (mmBERT-small), replaces `BASE_MODEL`/`SMALL_MODEL`/`DEFAULT_ENCODER`; `train.py` and the baseline now default to mmBERT-small, since mmBERT-base cannot meet the 256 MB limit.

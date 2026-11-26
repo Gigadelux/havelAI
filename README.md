@@ -1,6 +1,6 @@
 # havelAI
 
-_Last updated: 2026-11-25_
+_Last updated: 2026-11-26_
 
 A small Python library for detecting and classifying **prompt-injection attacks**, plus the workspace used to train a local classifier based on [mmBERT](https://huggingface.co/jhu-clsp/mmBERT-base).
 
@@ -42,9 +42,9 @@ uv run python -m model.train.train --dry-run                                    
 uv run python -m model.train.runpod_launch run                                       # RunPod training, dry run (needs --group cloud)
 ```
 
-Training runs on a rented RunPod GPU (it ran out of memory locally on MPS). Pod size and training memory are set in `.env`; see [`docs/TRAINING.md`](docs/TRAINING.md#training-on-runpod).
+Training runs on a rented RunPod GPU (it ran out of memory locally on MPS). Pod size and training memory are set in `.env`; see [`model/docs/TRAINING.md`](model/docs/TRAINING.md#training-on-runpod).
 
-Positive dataset rows are sent to OpenRouter and TypeSafe for labeling: do not use private text. Check the measured cost of a 200-row trial before a full run. See [`docs/ENHANCEMENT_PIPELINE.md`](docs/ENHANCEMENT_PIPELINE.md) and [`docs/TRAINING.md`](docs/TRAINING.md).
+Positive dataset rows are sent to OpenRouter and TypeSafe for labeling: do not use private text. Check the measured cost of a 200-row trial before a full run. See [`model/docs/ENHANCEMENT_PIPELINE.md`](model/docs/ENHANCEMENT_PIPELINE.md) and [`model/docs/TRAINING.md`](model/docs/TRAINING.md).
 
 ## Documentation
 
@@ -52,9 +52,10 @@ Positive dataset rows are sent to OpenRouter and TypeSafe for labeling: do not u
 |---|---|
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | The Python library: modules, detector protocol, packaging |
 | [`docs/TAXONOMY.md`](docs/TAXONOMY.md) | Attack classes, literature, caveats |
-| [`docs/ENHANCEMENT_PIPELINE.md`](docs/ENHANCEMENT_PIPELINE.md) | Relabeling the dataset with Jev |
-| [`docs/TRAINING.md`](docs/TRAINING.md) | Fine-tuning, metrics and plots, outputs |
-| [`docs/MODEL_ARCHITECTURE.md`](docs/MODEL_ARCHITECTURE.md) | mmBERT-small with binary + attack-type heads, 32k vocabulary, int8 (model defined, training and export not built) |
+| [`model/docs/ENHANCEMENT_PIPELINE.md`](model/docs/ENHANCEMENT_PIPELINE.md) | Relabeling the dataset with Jev |
+| [`model/docs/TRAINING.md`](model/docs/TRAINING.md) | Fine-tuning, metrics and plots, outputs |
+| [`model/docs/ARCHITECTURE.md`](model/docs/ARCHITECTURE.md) | The trained `havel_base` model (single-head mmBERT-small), chunked inference, and the planned two-head / 32k / int8 design |
+| [`model/docs/METRICS.md`](model/docs/METRICS.md) | Measured results of the first training run |
 | [`DECISIONS.md`](DECISIONS.md) | Design choices as "X over Y because Z" |
 | [`SECURITY.md`](SECURITY.md) | Security model, reporting a vulnerability |
 | [`CHANGELOG.md`](CHANGELOG.md) | Notable changes |
