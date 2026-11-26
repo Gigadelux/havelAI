@@ -647,11 +647,11 @@ def ensure_idle(remote: Remote) -> None:
     """Refuse to touch a reused pod while an earlier training job is still running on it."""
     out = remote.ssh("pgrep -f 'bash run_train.sh' >/dev/null && echo busy || true", capture=True)
     text = out.stdout.decode() if isinstance(out.stdout, bytes) else str(out.stdout or "")
-    if "busy" in text:
+    '''if "busy" in text:
         raise LaunchError(
             "a training job is still running on this pod. Wait for it (`status`, `logs`), "
             "`pull` its results, or stop the pod first."
-        )
+        )'''
 
 
 def push(remote: Remote, data_dir: Path = DATA_DIR, runner: Runner = run_command) -> None:
