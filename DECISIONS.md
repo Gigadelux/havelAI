@@ -16,6 +16,48 @@ A log of design choices, written as **"X over Y because Z"**. Add an entry whene
 
 ## Entries
 
+### 2026-11-26 — Next training batch: data augmentation for embedded injections
+- **Decision:** the next training data will be produced by a data-augmentation pipeline that inserts prompt injections into benign text in different ways: start, middle or end; wrapped in emails, documents, code, markdown or tool output; split across sentences; mixed with benign instructions.
+- **Over:** retraining on the same dataset rows; only adding more standalone attack prompts.
+- **Because:** the library scores chunks of real inputs, while the current training rows are short standalone prompts. An injection inside a chunk of benign text is the case the model has never seen.
+- **Consequences:** not built yet. It will need its own labels (the inserted attack's class, and the original benign label for the untouched text) and a test set built the same way. Until then, documents flag the long-text case as the known weak spot.
+
+### 2026-11-26 — Detection services behind extras; core stays stdlib-only
+- **Decision:** the layered detectors live in `src/services/{local,hosted}` and need `havelai[local]` or `havelai[hosted]`. Imports are `from havelai.local import Havel`. The core (taxonomy, results, regex layer, SQLite analytics) keeps no runtime dependencies.
+- **Over:** making onnxruntime, fastembed, pymilvus and the rest hard dependencies; renaming the package to `havel`.
+- **Because:** users who only need the taxonomy or the regex layer should not install about 500 MB of ML runtime, and hosted users do not need onnxruntime. Keeping the `havelai` name avoids a rename of the wheel, the docs and the import paths.
+- **Consequences:** heavy imports are lazy, so a missing extra fails when a layer is first used, not at import. Rule 7 of CLAUDE.md now reads "core stdlib-only; services behind extras".
+
+### 2026-11-26 — ONNX dynamic int8 as the default model file
+- **Decision:** publish fp32 safetensors (for transformers), ONNX fp32 and ONNX dynamic int8 (MatMul + Gather quantized). The library downloads the int8 file by default.
+- **Over:** PyTorch dynamic int8 (needs torch at runtime and cannot be loaded with `from_pretrained`), bitsandbytes int8 (GPU-oriented), optimum's exporter (one more dependency; plain `torch.onnx.export` + `onnxruntime.quantization` worked on the first try).
+- **Because:** int8 ONNX is 141.6 MB against 562.6 MB, under the 256 MB model budget, and runs on a laptop CPU with onnxruntime + tokenizers, no torch. The accuracy cost is measured on the test split by `hf_publish verify` (see `model/docs/TRAINING.md`).
+- **Consequences:** the 256k-token embedding table is still most of the file. Vocabulary pruning stays the next size lever.
+
+### 2026-11-26 — Score chunks, chunk size growing with the input
+- **Decision:** the local model layer splits prompts into sentence-aligned chunks of `clamp(64, 512, 32·⌈√tokens⌉)` tokens and takes the maximum chunk `p_injection`.
+- **Over:** one pass over the whole prompt (truncated at 512); fixed-size sliding windows; averaging chunk scores.
+- **Because:** an injection hidden in a long benign document is diluted or truncated away in a single pass. The maximum keeps one bad chunk decisive, and sentence alignment keeps chunks meaningful. Growing chunks keep the number of model calls on long inputs roughly proportional to √tokens.
+- **Consequences:** more false positives on long texts, since any one chunk can trigger. The model was not trained on chunks taken from mixed documents; the planned data-augmentation batch addresses that. The constants are untested on real traffic.
+
+### 2026-11-26 — Weighted average with automatic weights
+- **Decision:** final score = weighted average of the layer scores. The defaults are regex 0.1 / model 0.9 while the vector store is empty or off, and regex 0.1 / model 0.65 / vector 0.25 once it has vectors. Explicit weights are validated (sum to 1, disabled layer = 0, enabled layer > 0).
+- **Over:** max over layers; any-layer-fires; learned stacking.
+- **Because:** these are the owner's specified weights. An empty vector store would otherwise drag every score down by 25 %. Validation turns silent misconfiguration into an error.
+- **Consequences:** with the defaults, the regex layer alone (0.1) can never cross the 0.5 detect threshold. It nudges the score rather than deciding. Thresholds and weights are untuned.
+
+### 2026-11-26 — Qdrant for the hosted vector store, fastembed for embeddings
+- **Decision:** hosted vectors go to Qdrant; embeddings are always computed locally with fastembed (`paraphrase-multilingual-MiniLM-L12-v2`, 384 dimensions).
+- **Over:** Weaviate; provider-side embedding.
+- **Because:** Qdrant is Apache-2.0, has an embedded `:memory:` mode for offline tests and a mature Python client. fastembed runs on ONNX like the model layer, needs no torch, and the multilingual model matches mmBERT's multilingual base.
+- **Consequences:** changing the embedder changes the dimension; the connectors refuse a collection with a different dimension instead of mixing vectors.
+
+### 2026-11-26 — All data writes through `src/repositories/`
+- **Decision:** one abstract `Repository`, two abstract kinds (`VectorRepository`, `RecordRepository`), one connector per backend (Milvus Lite, Qdrant, SQLite, remote HTTP), picked by `factory.py`.
+- **Over:** each layer talking to its database directly.
+- **Because:** the owner asked for it, and it lets the local and hosted engines share all their code. The only difference between them is which connector they ask for, and tests can use an in-memory repository.
+- **Consequences:** a new backend is a new connector plus a factory entry. The SQL schema is defined once (`SCHEMA.sql`, mirrored in `src/repositories/schema.py`, kept identical by a test).
+
 ### 2026-11-21 — tqdm bars on the console, logging to stderr and a log file
 - **Decision:** training shows tqdm progress bars (epoch, validation, test) and logs through a `havelai.train` logger to stderr and `<run>/train.log`: start config, warnings, per-epoch lines and errors with tracebacks. Log lines go through `logging_redirect_tqdm`. A non-finite loss raises `FloatingPointError`; Ctrl+C exits 130 and still exports partial metrics.
 - **Over:** `print` statements; logging every 100 steps; leaving a NaN run to finish.

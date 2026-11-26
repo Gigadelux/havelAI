@@ -1,6 +1,8 @@
 # Attack taxonomy
 
-_Last updated: 2026-11-21_
+_Last updated: 2026-11-26_
+
+> 🧪 **Planned: a data-augmentation training batch.** The classes stay the same, but a pipeline will insert attacks of each class into benign text in different ways (position, wrapping in documents or tool output, splitting). The goal is for the model to recognize them inside the chunks the library scores, not only as standalone prompts. See [`model/docs/ARCHITECTURE.md`](../model/docs/ARCHITECTURE.md).
 
 The classes below are defined once, in [`src/data/taxonomy.py`](../src/data/taxonomy.py). The `ATTACK_CRITERIA` text there is sent verbatim to the labeler, so this document explains the choices and the code is the contract.
 

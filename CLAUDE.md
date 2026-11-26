@@ -18,9 +18,12 @@ havelAI/
 ├── .claude/                     # Claude Code settings, commands, hooks
 ├── assets/                      # brand assets
 ├── src/                         # the library; published as `havelai` (see pyproject.toml)
-│   ├── analytics/               # aggregate detection results
-│   ├── data/                    # attack taxonomy (single source of truth), dataset helpers
-│   ├── detection/               # Detection result, Detector protocol, detectors
+│   ├── analytics/               # summaries, DetectionReport, Markdown + plot export
+│   ├── data/                    # attack taxonomy (single source of truth), regex patterns
+│   ├── detection/               # Detection result, Detector protocol
+│   ├── repositories/            # ALL data writes: abstract Repository + connectors (Milvus Lite, Qdrant, SQLite, remote HTTP)
+│   ├── services/                # common/, local/, hosted/: regex_catch, model_catch, vector_learning_catch, detector_engine
+│   ├── local.py  hosted.py      # public entry points (`from havelai.local import Havel`)
 │   └── tests/                   # unit tests for the library
 ├── model/                       # training workspace, NOT shipped in the wheel
 │   ├── train/
@@ -28,6 +31,7 @@ havelAI/
 │   │   ├── enhance_pipeline.py  # adds the attack type to the binary dataset (Jev via OpenRouter)
 │   │   ├── train.py             # fine-tunes mmBERT on the enhanced data; writes checkpoints/
 │   │   └── metrics.py           # TrainingMetrics: metric math, tracking, plot export
+│   ├── export/hf_publish.py     # ONNX fp32/int8 export, verify, model card, HF upload
 │   ├── architecture.py          # mmBERT sequence classifier
 │   ├── docs/                    # model docs: ARCHITECTURE, METRICS, TRAINING, ENHANCEMENT_PIPELINE (+ img/)
 │   └── tests/                   # unit tests for the pipeline
@@ -35,7 +39,7 @@ havelAI/
 ├── gitignore/                   # IGNORED BY GIT — never commit anything here
 │   ├── data/  docs/  temp/
 ├── .gitignore  .python-version  example.env  pyproject.toml  requirements.txt  uv.lock  LICENSE
-├── ARCHITECTURE.md  CHANGELOG.md  CLAUDE.md  DECISIONS.md  README.md  SECURITY.md
+├── ARCHITECTURE.md  CHANGELOG.md  CLAUDE.md  DECISIONS.md  README.md  SECURITY.md  SCHEMA.sql
 ```
 
 ### Where things go
@@ -43,7 +47,11 @@ havelAI/
 |---|---|
 | Attack classes and their definitions | `src/data/taxonomy.py` (nothing else defines labels) |
 | Detection result type, detector interface, detectors | `src/detection/` |
-| Aggregations over detections | `src/analytics/` |
+| Aggregations over detections, `DetectionReport` | `src/analytics/` |
+| Detection layers and engines | `src/services/{common,local,hosted}/` |
+| Any data write (vectors, analytics) | `src/repositories/` (abstract base + one connector per backend) |
+| Analytics SQL schema | `SCHEMA.sql` (mirrored in `src/repositories/schema.py`, kept identical by a test) |
+| Model export and Hugging Face publishing | `model/export/hf_publish.py` |
 | Dataset relabeling | `model/train/enhance_pipeline.py` |
 | Model definition / training | `model/architecture.py`, `model/train/train.py` |
 | Metrics and plots (one class, `TrainingMetrics`) | `model/train/metrics.py`; `train.py` only calls it |
@@ -69,7 +77,9 @@ Details live in `model/docs/`; keep them there, not here. Measured results of ea
 - **Data enhancement** (`model/train/enhance_pipeline.py`, see `model/docs/ENHANCEMENT_PIPELINE.md`): relabels `jayavibhav/prompt-injection` (binary) with an attack type using Jev (`typesafe/jev-1.14`) on OpenRouter. Only label-1 rows are sent; output is resumable JSONL in `model/train/data/enhanced/`. Pin the model version, never `~typesafe/jev-latest`.
 - **Training** (`model/train/train.py`, see `model/docs/TRAINING.md`): fine-tunes mmBERT with tqdm progress bars and logging (stderr + `train.log`, never dataset text), on the enhanced data, and writes `model/train/checkpoints/<run>/` (gitignored), including a `metrics/` folder with JSON tables and PNG plots from `model/train/metrics.py`. Headline metric is injection vs benign against the dataset's original `label`; attack-type metrics only measure agreement with Jev.
 - **Training on RunPod** (`model/train/runpod_launch.py`, see `model/docs/TRAINING.md`): training runs on a RunPod GPU pod over SSH (it ran out of memory locally on MPS). Pod size (RUNPOD_*) and training memory (TRAIN_*) come from `.env`. Creating a pod costs money: dry run first, `--yes` only with the owner's go-ahead. `runpod` lives in the `cloud` dependency group, not in the `model` extra.
-- **Model design** (`model/architecture.py`, see `model/docs/ARCHITECTURE.md`): target is mmBERT-small, 32k vocabulary, int8, binary + attack-type heads, model file at most 256 MB, no second model trained for memory. `model/architecture.py` defines the two-head model; `train.py` still trains the single-head baseline, and vocabulary pruning and the int8 export are not built (see that doc).
+- **Model design** (`model/architecture.py`, see `model/docs/ARCHITECTURE.md`): target is mmBERT-small, 32k vocabulary, int8, binary + attack-type heads, model file at most 256 MB, no second model trained for memory. `model/architecture.py` defines the two-head model; `train.py` still trains the single-head baseline, which is what is published as `havel_base`. Vocabulary pruning and the two-head export are not built (see that doc).
+- **Publishing** (`model/export/hf_publish.py`, see `model/docs/TRAINING.md#export-and-publishing`): `export` → ONNX fp32 + dynamic int8, `verify` → both against the held-out test split, `card` → model card, `upload` → `Gigadelux/havel_base` (**private**; dry run unless `--yes`, and `--yes` only with the owner's go-ahead). The dataset license is unverified, so do not make the repo public without the owner.
+- **Coming next: data-augmentation training batch.** A pipeline that inserts prompt injections into benign text in different ways (position, wrapping, splitting), so the model learns to find injections inside the chunks `model_catch` scores. Not built yet; mention it wherever the model's limits are documented.
 
 ```bash
 uv run python -m model.train.enhance_pipeline --split train --limit 200 --dry-run   # print a request, call nothing
@@ -83,7 +93,7 @@ uv run python -m model.train.train --dry-run                                    
 4. **Dataset license is unverified.** Do not redistribute the dataset or derived data without checking it.
 5. **Never make a failing test or eval pass by changing the test, its threshold or its dataset.** Fix the code or report the failure.
 6. **`src/data/taxonomy.py` is the only place labels are defined.**
-7. **The library stays stdlib-only at runtime.** Heavy dependencies (torch, transformers, datasets, httpx) belong in the `model` extra.
+7. **The library core stays stdlib-only at runtime.** The detection services sit behind the `local` and `hosted` extras and import their dependencies lazily; training tooling (torch, transformers, datasets) belongs in the `model` extra.
 8. **New dependencies must be license-compatible with Apache 2.0.** Note notable ones in `README.md`.
 
 ## Working conventions
@@ -104,6 +114,7 @@ uv run python -m model.train.train --dry-run                                    
 ## Commands
 ```bash
 uv sync --extra model        # install library + training/data tooling
+uv sync --extra model --extra local --extra hosted   # + detection services (needed by their tests)
 uv sync --extra model --group cloud   # + runpod SDK for model/train/runpod_launch.py
 uv run ruff check . && uv run ruff format .
 uv run pytest                # src/tests and model/tests
