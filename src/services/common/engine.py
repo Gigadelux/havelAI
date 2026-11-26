@@ -23,7 +23,7 @@ from ... import __version__
 from ...analytics.report import LAYERS, DetectionReport, LayerScore, VectorMatch
 from ...data.taxonomy import AttackType
 from ...repositories.base import VectorRepository
-from ...repositories.factory import get_vector_repository
+from ...repositories.factory import get_record_repository, get_vector_repository
 from . import config as cfg
 from .layer import Layer, LayerResult
 
@@ -283,3 +283,26 @@ class HavelEngine:
                 written += dest.upsert(batch)
         logger.info("havelai: saved %d vectors to %r", written, dest)
         return written
+
+    # ----------------------------------------------------------------------- analytics
+
+    def save_metrics(self, target: str | Path = HOSTED, **remote: Any) -> int:
+        """Store the detection history. A path: a SQLite file with the tables of SCHEMA.sql
+        (plus the vector store's texts in `learned_vectors`). `"hosted"`: POST each report to
+        the analytics endpoint (`url=` / `api_key=` or HAVEL_ANALYTICS_URL / _API_KEY)."""
+        if str(target) == HOSTED:
+            repo = get_record_repository("remote_http", **remote)
+        else:
+            repo = get_record_repository("sqlite", path=target)
+        with repo:
+            written = repo.write([r.to_dict() for r in self.history])
+            if self._vector is not None and hasattr(repo, "write_vectors"):
+                source = self._vector.repository
+                repo.write_vectors(list(source.iter_records()), source.dimension)
+        return written
+
+    def export_metrics_summary(self, path: str | Path) -> Path:
+        """Markdown summary of the detection history with matplotlib plots next to it."""
+        from ...analytics.export import export_summary
+
+        return export_summary(self.history, path)
