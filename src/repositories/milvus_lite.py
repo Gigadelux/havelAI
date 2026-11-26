@@ -16,6 +16,7 @@ from .base import (
 )
 
 PAYLOAD_FIELDS = ["text", "source", "attack_type", "score", "embedder", "created_at"]
+MAX_QUERY_WINDOW = 16_384  # Milvus caps offset + limit of a single query
 
 
 class MilvusLiteRepository(VectorRepository):
@@ -25,6 +26,9 @@ class MilvusLiteRepository(VectorRepository):
         super().__init__(dimension, collection)
         self.path = Path(path)
         self._client: Any = None
+
+    def __repr__(self) -> str:
+        return f"MilvusLiteRepository({str(self.path)!r}, collection={self.collection!r})"
 
     @property
     def client(self) -> Any:
@@ -104,11 +108,18 @@ class MilvusLiteRepository(VectorRepository):
         return [hit_from_payload(h.get("entity", {}), h["distance"]) for h in hits]
 
     def iter_records(self, batch_size: int = 512) -> Iterator[VectorRecord]:
+        # Milvus Lite does not implement the timestamp call behind query_iterator (it logs a gRPC
+        # traceback and falls back), so read with plain queries while the store fits one query.
+        n = self.count()
+        fields = [*PAYLOAD_FIELDS, "vector"]
+        if n <= MAX_QUERY_WINDOW:
+            for row in self.client.query(
+                self.collection, filter='id != ""', output_fields=fields, limit=max(n, 1)
+            ):
+                yield record_from_payload(row, row["vector"])
+            return
         it = self.client.query_iterator(
-            collection_name=self.collection,
-            batch_size=batch_size,
-            filter="",
-            output_fields=[*PAYLOAD_FIELDS, "vector"],
+            collection_name=self.collection, batch_size=batch_size, filter="", output_fields=fields
         )
         try:
             while batch := it.next():

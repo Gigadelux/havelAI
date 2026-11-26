@@ -42,6 +42,7 @@ Add one line per meaningful change under `[Unreleased]`. Security-relevant chang
 
 ### Fixed
 - 2026-11-21: relative imports in `src/` and `dev-mode-dirs` so the `src` → `havelai` rename works for built wheels and editable installs.
+- 2026-11-26: `MilvusLiteRepository.iter_records` reads with plain queries (up to 16,384 rows) instead of `query_iterator`, which Milvus Lite does not fully implement and which logged a gRPC traceback during `Havel.save()`.
 
 ### Security
 - 2026-11-21: key from env only, no raw text in logs, data and checkpoints gitignored.
