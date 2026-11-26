@@ -193,3 +193,25 @@ def test_latest_run_picks_newest_with_best(tmp_path):
 def test_verify_without_data_measures_nothing(tmp_path):
     run = _fake_export(tmp_path)
     assert hp.verify(run, tmp_path / "missing", None, 8) is None
+
+
+def test_load_tokenizer_disables_stored_padding(tmp_path):
+    tokenizers = pytest.importorskip("tokenizers")
+    from tokenizers.models import WordLevel
+    from tokenizers.pre_tokenizers import Whitespace
+
+    tok = tokenizers.Tokenizer(
+        WordLevel({"<pad>": 0, "a": 1, "b": 2, "<unk>": 3}, unk_token="<unk>")
+    )
+    tok.pre_tokenizer = Whitespace()
+    tok.enable_padding(pad_id=0, pad_token="<pad>")  # as in the checkpoint's tokenizer.json
+    path = tmp_path / "tokenizer.json"
+    tok.save(str(path))
+    loaded = hp.load_tokenizer(path, max_length=2)
+    ids = [e.ids for e in loaded.encode_batch(["a", "a b a"])]
+    assert ids == [[1], [1, 2]]  # no padding to the longest row, truncated at 2
+
+
+def test_card_snippet_disables_padding():
+    card = hp.render_card("run-x", _test_metrics(), _run_info(), None, {})
+    assert "tok.no_padding()" in card

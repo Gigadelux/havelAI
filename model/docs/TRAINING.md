@@ -225,7 +225,16 @@ A sanity check on two hand-written sentences, plus one input over 512 tokens: th
 
 ### Measured: ONNX fp32 vs int8 (run `mmBERT-small-runpod-20261125T190715Z`)
 
-Not measured yet: `verify` on the full 18,404-row test split was still running when this section was written. The numbers are added here, and in the model card, when it finishes.
+Full test split, 18,404 rows, ONNX Runtime on a MacBook CPU (Apple silicon), batch 32, truncation at 512. For reference, the PyTorch fp32 evaluation at the end of training (CUDA, bf16 autocast) gave accuracy 0.9963, F1 0.9934, FPR 0.0014 and attack-type macro-F1 0.9051 ([`METRICS.md`](METRICS.md)).
+
+| File | Size | Accuracy | Precision | Recall | F1 | FPR | TP / FP / FN / TN | Attack-type acc | Attack-type macro-F1 | Time |
+|---|---|---|---|---|---|---|---|---|---|---|
+| `onnx/model.onnx` | 563.1 MB | 0.9964 | 0.9965 | 0.9905 | 0.9935 | 0.0014 | 5,111 / 18 / 49 / 13,226 | 0.9781 | 0.9054 | 177 s |
+| `onnx/model_int8.onnx` | 141.6 MB | 0.9964 | 0.9959 | 0.9911 | 0.9935 | 0.0016 | 5,114 / 21 / 46 / 13,223 | 0.9786 | 0.9034 | 168 s |
+
+int8 and fp32 predict the same class for **99.68%** of rows. Binary metrics are against the dataset label; attack-type metrics are agreement with Jev. **int8 costs 0.0002 in false-positive rate and 0.002 in attack-type macro-F1, for a file 4x smaller**, so it is the library default.
+
+> A first verify run reported ONNX fp32 accuracy 0.727. That was a bug in `verify`, not in the model: the checkpoint's `tokenizer.json` stores a padding setting, so every row was padded to the longest one and the pads were scored as real tokens. Fixed with `tokenizer.no_padding()` and a regression test. The library's `model_catch` was not affected.
 
 ## Tested and not tested
 

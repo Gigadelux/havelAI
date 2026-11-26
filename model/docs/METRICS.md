@@ -131,9 +131,12 @@ Train / validation / test: 157,348 / 8,282 / 18,404 rows (from `train.log`). Tes
 
 The data is heavily imbalanced: `benign` is 72% of train, and four attack classes have under 1,000 rows each.
 
+## Quantized model (ONNX int8)
+
+Same test split, ONNX Runtime on CPU: accuracy 0.9964, F1 0.9935, false-positive rate 0.0016, attack-type macro-F1 0.9034, at 141.6 MB. Details and the fp32 ONNX comparison: [`TRAINING.md`](TRAINING.md#export-and-publishing).
+
 ## Not measured yet
 
-- The **int8 ONNX** model against fp32 (`model/export/hf_publish.py verify`; results go in [`TRAINING.md`](TRAINING.md#export-and-publishing)).
 - Results on a second, independent prompt-injection dataset.
 - Injections embedded in long benign text, which chunking and the data-augmentation batch target.
 - Latency and memory on a laptop CPU.

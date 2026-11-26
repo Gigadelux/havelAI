@@ -112,7 +112,7 @@ Fine-tuned from [`jhu-clsp/mmBERT-small`](https://huggingface.co/jhu-clsp/mmBERT
 |---|---|---|---|---|---|
 | havel_base | 0.9963 | 0.9965 | 0.9903 | 0.9934 | 0.0014 |
 
-Attack type: accuracy 0.9781, macro-F1 0.9051. That measures *agreement with the automatic labeler*, not human labels. The test split comes from the same dataset as the training data, so expect lower numbers on real traffic. Full results: [`model/docs/METRICS.md`](model/docs/METRICS.md). The ONNX versions are compared with fp32 in [`model/docs/TRAINING.md`](model/docs/TRAINING.md#export-and-publishing).
+Attack type: accuracy 0.9781, macro-F1 0.9051. That measures *agreement with the automatic labeler*, not human labels. The test split comes from the same dataset as the training data, so expect lower numbers on real traffic. Full results: [`model/docs/METRICS.md`](model/docs/METRICS.md). The int8 ONNX model the library uses by default scores the same on that split: accuracy 0.9964, F1 0.9935, false-positive rate 0.0016, attack-type macro-F1 0.9034. It agrees with fp32 on 99.68% of rows ([details](model/docs/TRAINING.md#export-and-publishing)).
 
 | File | Size |
 |---|---|

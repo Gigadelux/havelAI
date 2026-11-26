@@ -47,6 +47,7 @@ Add one line per meaningful change under `[Unreleased]`. Security-relevant chang
 - 2026-11-26: `MilvusLiteRepository.iter_records` reads with plain queries (up to 16,384 rows) instead of `query_iterator`, which Milvus Lite does not fully implement and which logged a gRPC traceback during `Havel.save()`.
 - 2026-11-26: count axes in the `export_metrics_summary` plots use whole-number ticks.
 - 2026-11-26: `MilvusLiteRepository` loads an existing collection when it reopens a `.db` file; before, search on a reopened store failed with "collection is released".
+- 2026-11-26: `hf_publish verify` switches off the padding stored in the checkpoint's `tokenizer.json`. Before, `encode_batch` padded every row to the longest one and the pads were scored as real tokens, so the first verify run (ONNX fp32 binary accuracy 0.727) measured the bug, not the model. The model card snippet also disables padding, and `verify --limit N` now takes a seeded random sample instead of the first N rows (which were all benign). Re-measured: ONNX int8 F1 0.9935, FPR 0.0016, attack-type macro-F1 0.9034 (`model/docs/TRAINING.md`).
 
 ### Security
 - 2026-11-21: key from env only, no raw text in logs, data and checkpoints gitignored.
