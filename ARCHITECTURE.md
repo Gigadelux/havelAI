@@ -74,7 +74,7 @@ Each layer implements `Layer.score(text) -> LayerResult(layer, score, fired, att
 
 **Vector layer, three phases.**
 1. `initialize(path, column, table=None)`: load known attack texts from csv/tsv, parquet or SQLite (`services/common/ingest.py`). Raises `VectorIngestError` if the column is missing or not text: a numeric csv column, a non-string parquet type, or a SQLite column without text affinity or with non-TEXT values.
-2. `learn(chunks, scores)`: the engine passes each chunk with `w_regex·regex + w_model·chunk_p_inj`, the two weights rescaled to sum to 1. Chunks at or above `learn_threshold` (0.7) are stored with their attack type. Off with `VectorConfig(learning=False)`.
+2. `learn(chunks, scores)`: runs automatically at the end of every `detect()` call. The engine passes each chunk with `w_regex·regex + w_model·chunk_p_inj`, the two weights rescaled to sum to 1. Chunks at or above `learn_threshold` (0.7) are embedded and upserted straight into the active store (`VectorConfig.db_path` for Milvus Lite, or Qdrant) with their attack type — no manual `save()` needed. Off with `VectorConfig(learning=False)`.
 3. `detect(text)`: the highest similarity and the top 10 stored texts.
 
 ### Weights (`services/common/config.py`)
@@ -106,14 +106,15 @@ h.Config(
 ).VectorConfig(
     catch_threshold=0.8,
     learn_threshold=0.7,
-    provider_url=None,       # Qdrant for save("hosted"); default QDRANT_URL in .env
-    provider_api_key=None,   # default QDRANT_API_KEY
-).ModelConfig()              # local default: havel_base int8, downloaded on first use (logged)
+    db_path="havel_vectors.db",  # local Milvus Lite file; detect() writes learned chunks here directly
+    provider_url=None,           # Qdrant for hosted mode / save("hosted"); default QDRANT_URL in .env
+    provider_api_key=None,       # default QDRANT_API_KEY
+).ModelConfig()                  # local default: havel_base int8, downloaded on first use (logged)
 
-report = h.detect(prompt)                # DetectionReport
+report = h.detect(prompt)                # DetectionReport (auto-learns chunks >= learn_threshold)
 h.initialize_vectors("attacks.csv", column="text")
-h.save("vectors.db")                     # copy the vector store to a Milvus Lite file
-h.save("hosted")                         # push it to Qdrant (url/api_key from VectorConfig or .env)
+h.save("vectors_backup.db")              # optional: copy the vector store to another Milvus Lite file
+h.save("hosted")                         # optional: push it to Qdrant (url/api_key from VectorConfig or .env)
 h.save_metrics("metrics.sqlite")         # history → SQLite (SCHEMA.sql); "hosted" → HAVEL_ANALYTICS_URL
 h.export_metrics_summary("summary.md")   # Markdown + PNG plots in summary_plots/
 ```

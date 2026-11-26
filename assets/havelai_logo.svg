@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 380" width="980" height="380">
+  <defs>
+    <style>
+      .wordmark {
+        font-family: 'Plus Jakarta Sans', 'Inter', 'Montserrat', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+        font-weight: 700;
+        font-size: 136px;
+        letter-spacing: -4.5px;
+      }
+    </style>
+  </defs>
+
+  
+  <rect x="0" y="0" width="980" height="380" rx="28" ry="28" fill="#141414" />
+
+  
+  <g transform="translate(60, 40)">
+    
+    <g id="shield-icon-white" fill="#FFFFFF">
+      
+      <path d="M 134 26 L 44 64 L 44 138 C 44 202 82 248 134 274 L 134 202 L 104 202 L 104 168 L 76 168 L 76 92 L 134 92 Z" />
+      
+      <path d="M 158 26 L 248 64 L 248 138 C 248 202 210 248 158 274 L 158 202 L 188 202 L 188 168 L 216 168 L 216 92 L 158 92 Z" />
+      
+      <polygon points="122,118 194,118 166,154 94,154" />
+    </g>
+
+    
+    <text x="292" y="196" fill="#FFFFFF" class="wordmark">havelAI</text>
+  </g>
+</svg>

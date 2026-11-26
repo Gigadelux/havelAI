@@ -1,4 +1,6 @@
-# 🛡️ havelAI
+<p align="center">
+  <img src="assets/havelai_logo.svg" alt="havelAI" width="440" />
+</p>
 
 _Last updated: 2026-11-26_
 
@@ -24,7 +26,7 @@ report.score          # weighted score from all layers, 0..1
 - 🔎 **Three layers, one score.** Fast regex rules, a small fine-tuned classifier, and a semantic memory of known attacks, blended with weights you control.
 - 🏷️ **It names the attack.** One of 9 attack types ([taxonomy](docs/TAXONOMY.md)): instruction override, jailbreak persona, prompt leaking, data exfiltration, coercion, context manipulation, obfuscation, harmful task request, other.
 - 💻 **Runs locally.** ONNX int8 model (142 MB), no torch, no GPU, no data leaving your machine.
-- 🧲 **Learns as it goes.** Chunks the other layers are confident about are stored in the vector database, so the next variation of the same attack is caught by similarity.
+- 🧲 **Learns as it goes.** On every `detect()` call, chunks whose regex+model score reaches `learn_threshold` (default `0.7`) are embedded and persisted straight to the vector store (Milvus Lite locally, Qdrant when hosted), so the next variation of the same attack is caught by similarity.
 - ☁️ **Or go hosted.** Swap in a guard model at a provider (gpt-oss-safeguard, Llama Guard) and Qdrant, with the same API.
 - 📊 **Analytics built in.** Every detection returns a full report, which you can store in SQLite (or POST to your own endpoint) or export as a Markdown summary with plots.
 
@@ -76,20 +78,22 @@ h.Config(
     vector_catcher=True,
 ).VectorConfig(
     catch_threshold=0.8,   # similarity that flags a prompt
-    learn_threshold=0.7,   # regex+model score that stores a chunk
+    learn_threshold=0.7,   # regex+model score that auto-learns and persists a chunk on detect()
+    db_path="vectors.db",  # local Milvus Lite file (default: havel_vectors.db); written automatically
 ).ModelConfig(
     precision="int8",      # or "fp32"; downloaded from Hugging Face on first use (logged)
 )
 
-h.initialize_vectors("known_attacks.csv", column="text")   # csv / parquet / SQLite (table=...)
+h.initialize_vectors("known_attacks.csv", column="text")   # optional seed: csv / parquet / SQLite (table=...)
 
-report = h.detect(user_input)
+report = h.detect(user_input)   # automatically learns & persists chunks >= learn_threshold
 if report.is_injection:
     print(report.attack_type, report.score, report.detected_by)
 print(report.contributions)   # weight x score for each layer
 
-h.save("vectors.db")                     # keep the learned vector memory
-h.save("hosted")                         # ...or push it to Qdrant (QDRANT_URL / QDRANT_API_KEY)
+# Optional: copy/export the vector store to another file or push it to Qdrant
+h.save("vectors_backup.db")              # copy the vector store to another Milvus Lite file
+h.save("hosted")                         # push it to Qdrant (QDRANT_URL / QDRANT_API_KEY)
 h.save_metrics("metrics.sqlite")         # every report, in the tables of SCHEMA.sql
 h.export_metrics_summary("summary.md")   # Markdown + PNG plots
 ```
@@ -152,7 +156,6 @@ uv run python -m model.export.hf_publish upload                                 
 | [`model/docs/METRICS.md`](model/docs/METRICS.md) | Measured results of the first training run |
 | [`model/docs/TRAINING.md`](model/docs/TRAINING.md) | Fine-tuning, RunPod, export and publishing |
 | [`model/docs/ENHANCEMENT_PIPELINE.md`](model/docs/ENHANCEMENT_PIPELINE.md) | Relabeling the dataset with Jev |
-| [`assets/LOGO_PROMPT.md`](assets/LOGO_PROMPT.md) | Prompt for generating the logo |
 | [`DECISIONS.md`](DECISIONS.md) | Design choices as "X over Y because Z" |
 | [`SECURITY.md`](SECURITY.md) | Security model, reporting a vulnerability |
 | [`CHANGELOG.md`](CHANGELOG.md) | Notable changes |
