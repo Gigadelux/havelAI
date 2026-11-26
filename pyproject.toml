@@ -31,6 +31,24 @@ model = [
     "tqdm",
     "transformers",
 ]
+local = [
+    "fastembed>=0.7",
+    "huggingface-hub>=1.31",
+    "matplotlib>=3.11.2",
+    "numpy>=2.4.6",
+    "onnxruntime>=1.32.0",
+    "pyarrow>=15",
+    "pymilvus[milvus-lite]>=2.6",
+    "tokenizers>=0.20",
+]
+hosted = [
+    "fastembed>=0.7",
+    "httpx>=0.28.1",
+    "matplotlib>=3.11.2",
+    "numpy>=2.4.6",
+    "pyarrow>=15",
+    "qdrant-client>=1.12",
+]
 
 [dependency-groups]
 cloud = [
